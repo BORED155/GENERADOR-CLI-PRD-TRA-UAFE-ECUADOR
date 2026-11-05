@@ -1,0 +1,61 @@
+# Construye los ejecutables de Windows y Linux en los servidores de GitHub.
+# Se ejecuta a mano (pestaña Actions -> "Construir ejecutables" -> Run workflow) o al
+# publicar una etiqueta vX.Y.Z. Los ZIP quedan como "Artifacts" del run y, si es una
+# etiqueta, también en la página Releases para descargarlos directamente.
+name: Construir ejecutables
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  construir:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: ubuntu-22.04      # se construye en una versión antigua para que funcione en distribuciones nuevas
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Librerías de sistema para Qt (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Instalar
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]" pyinstaller
+      - name: Pruebas
+        env:
+          QT_QPA_PLATFORM: offscreen
+        # os._exit evita un cierre con error de Qt en Windows al terminar Python (las pruebas ya terminaron)
+        run: python -c "import os, pytest; os._exit(int(pytest.main(['-q'])))"
+      - name: Construir
+        run: python empaquetar/construir.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeneradorRESU-${{ matrix.os }}
+          path: dist/*.zip
+
+  publicar:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: construir
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ejecutables
+          merge-multiple: true
+      - name: Crear la versión (Release) con los ejecutables
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" ejecutables/*.zip --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --notes "Ejecutables para Windows y Linux."
