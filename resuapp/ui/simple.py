@@ -7,7 +7,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QSettings, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QObject, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
@@ -97,6 +97,8 @@ podría no ser aceptado por la UAFE, se avisa antes.</li>
 <li>Pulse <b style="color:#c62828">Abrir UAFI de la empresa</b>: escriba el usuario, elija el mes,
 cargue CLI, OPR y TRA, pulse <b>Validar</b> y luego <b>Guardar</b>.</li>
 </ol>
+<p><i>En Linux el UAFI guarda el .uaf con un nombre de Windows (por ejemplo «mi carpeta\RESU….uaf», fuera de
+la carpeta elegida). Si lo abrió con el botón rojo, el programa lo corrige solo y le avisa dónde quedó.</i></p>
 
 <h3>Datos de la empresa</h3>
 <p>Abajo se ven nombre, RUC, código de registro, usuario SISLAFT y código de agencia.
@@ -311,6 +313,10 @@ class CampoCopiable(QLabel):
                 self.styleSheet().replace("background: #d4edda", "background: white")))
 
 
+class _SenalUaf(QObject):
+    listo = Signal(object, bool, object)
+
+
 class TablaFacturas(QTableWidget):
     def __init__(self):
         super().__init__(0, len(COLUMNAS))
@@ -342,6 +348,8 @@ class VentanaSimple(QMainWindow):
         self.lista: list[facturas.Factura] = []
         self._cargando = False
         self._marcas: dict[tuple[str, str], list[str]] = {}   # (cliente, factura) -> problemas al validar
+        self._senal_uaf = _SenalUaf()
+        self._senal_uaf.listo.connect(self._uaf_revisado)
 
         # --- empresa y mes ---
         self.c_empresa = QComboBox()
@@ -1137,10 +1145,64 @@ class VentanaSimple(QMainWindow):
         if self.empresa is None:
             return
         try:
-            uafi.abrir(self.empresa)
+            proceso = uafi.abrir(self.empresa)
             self.statusBar().showMessage(f"Abriendo el UAFI de {self.empresa.nombre}…", 6000)
         except Exception as ex:  # noqa: BLE001
             QMessageBox.warning(self, "UAFI", str(ex))
+            return
+        self._vigilar_uaf(proceso)
+
+    # ------------------------------------------------------------------
+    # El UAFI está hecho para Windows: en Linux guarda «carpeta\RESU….uaf» fuera de la carpeta
+    # elegida. Mientras esté abierto se revisa cada pocos segundos y se corrige (reparar_uaf).
+    def _vigilar_uaf(self, proceso) -> None:
+        import sys
+        import threading
+        import time
+
+        from PySide6.QtCore import QTimer
+
+        from .. import reparar_uaf
+
+        if sys.platform.startswith("win"):
+            return   # en Windows la barra invertida sí es el separador de carpetas
+        desde = time.time() - 5
+        carpetas = [Path.home()]
+        exportar = QSettings().value(f"exportar/{self.empresa.id}", "")
+        if exportar and not str(exportar).startswith(str(Path.home())):
+            carpetas.append(Path(str(exportar)))
+        estado = {"ocupado": False}
+        reloj = QTimer(self)
+
+        def revisar():
+            if estado["ocupado"]:
+                return
+            estado["ocupado"] = True
+            terminado = proceso.poll() is not None
+
+            def trabajo():
+                try:
+                    cambios = reparar_uaf.reparar_todo(carpetas, desde)
+                except Exception:  # noqa: BLE001
+                    cambios = []
+                estado["ocupado"] = False
+                self._senal_uaf.listo.emit(cambios, terminado, reloj)
+
+            threading.Thread(target=trabajo, daemon=True).start()
+
+        reloj.timeout.connect(revisar)
+        reloj.start(3000)
+
+    def _uaf_revisado(self, cambios: list, terminado: bool, reloj) -> None:
+        if terminado:
+            reloj.stop()
+            reloj.deleteLater()
+        for viejo, nuevo in cambios:
+            self.statusBar().showMessage(f"Archivo .uaf corregido: {nuevo}", 15000)
+            QMessageBox.information(
+                self, "Archivo .uaf",
+                f"El UAFI guardó el archivo con un nombre de Windows:<br><b>{_html(viejo.name)}</b><br><br>"
+                f"Se corrigió y quedó en:<br><b>{_html(str(nuevo))}</b>")
 
     def mostrar_ayuda(self) -> None:
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser
