@@ -18,7 +18,7 @@ from .. import excel, facturas, importar_facturas as imf, uafi
 from ..modelo import Reporte, entero, periodo
 from ..reglas import validar
 from ..rutas import carpeta_documentos
-from .campos import ControlBuscador
+from .campos import ComboCanton, ControlBuscador
 from .empresas import DialogoEmpresas
 
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
@@ -121,17 +121,18 @@ class DelegadoCanton(QStyledItemDelegate):
         self.ventana = ventana
 
     def createEditor(self, parent, option, index):
-        editor = ControlBuscador(None, self.ventana.empresa.catalogos.tabla("C"),
-                                 "Escriba el cantón (ej.: Quito) o su código…", parent)
-        editor.setAutoFillBackground(True)
-        editor.completer.activated.connect(lambda _t, ed=editor: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
+        editor = ComboCanton(self.ventana.empresa.catalogos.tabla("C"), parent)
+        editor.activated.connect(lambda _i, ed=editor: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
         return editor
 
     def setEditorData(self, editor, index):
-        editor.edit.setPlaceholderText(f"Actual: {index.data()}  — escriba para buscar otro")
-        editor.codigo = ""
-        editor.edit.clear()
-        editor.edit.setFocus()
+        editor.poner_valor(index.data(Qt.UserRole) or "")
+        editor.showPopup()   # la lista completa de cantones del catálogo
+
+    def updateEditorGeometry(self, editor, option, index):
+        r = option.rect
+        r.setWidth(max(r.width(), 360))
+        editor.setGeometry(r)
 
     def setModelData(self, editor, model, index):
         if editor.valor():
@@ -490,7 +491,7 @@ class VentanaSimple(QMainWindow):
         c_aec = ControlBuscador(cliente.campo("AEC"), cat.tabla("AE"),
                                 "Escriba la actividad (ej.: construcción de edificios) o su código…")
         c_aec.setToolTip("Para clientes nuevos. Los clientes que ya estaban en reportes anteriores conservan la suya.")
-        c_ccc = ControlBuscador(cliente.campo("CCC"), cat.tabla("C"), "Escriba el cantón (ej.: Quito) o su código…")
+        c_ccc = ComboCanton(cat.tabla("C"))
         c_ccc.setToolTip("Si la dirección de la factura no menciona un cantón conocido.")
         e_cat = QLineEdit(e.agencia_defecto())
         e_cat.setMaxLength(9)
@@ -522,8 +523,8 @@ class VentanaSimple(QMainWindow):
         for combo in (c_ttr, c_ttb, c_inst):
             combo.currentIndexChanged.connect(lambda _i: self._mostrar_lista())
         e_adb.editingFinished.connect(self._mostrar_lista)
-        for buscador in (c_aec, c_ccc):
-            buscador.cambiado.connect(lambda: self._mostrar_lista() if self.controles else None)
+        c_aec.cambiado.connect(lambda: self._mostrar_lista() if self.controles else None)
+        c_ccc.currentIndexChanged.connect(lambda _i: self._mostrar_lista() if self.controles else None)
 
     def _opciones(self) -> imf.Opciones:
         c = self.controles

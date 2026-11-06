@@ -256,3 +256,22 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     assert [f.resu.get("adb") for f in v2.lista] == [None, "150", "150"]
     assert v2.tabla.item(1, simple.C_ADB).text() == "150"
     v.close(); v2.close()
+
+
+def test_lista_de_cantones(datos, uafi_zip):
+    from PySide6.QtWidgets import QApplication
+
+    from resuapp.ui.campos import ComboCanton
+
+    app = QApplication.instance() or QApplication([])
+    tabla = {"0000": "N/A", "1701": "QUITO", "0901": "GUAYAQUIL", "0402": "BOLIVAR", "1302": "BOLIVAR"}
+    c = ComboCanton(tabla)
+    textos = [c.itemText(i) for i in range(c.count())]
+    assert textos == ["BOLIVAR (CARCHI) — 0402", "BOLIVAR (MANABÍ) — 1302", "GUAYAQUIL (GUAYAS) — 0901",
+                      "QUITO (PICHINCHA) — 1701"]                     # todos, por nombre, sin «N/A»
+    c.poner_valor("1302")
+    assert c.valor() == "1302"
+    c.setEditText("quito")                                            # escribir filtra y resuelve
+    assert c.valor() == "1701"
+    c.setEditText("bolivar")                                          # dos coincidencias: hay que elegir
+    assert c.valor() == ""

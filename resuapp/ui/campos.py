@@ -263,3 +263,55 @@ class ControlBuscador(Control):
         self.edit.setText(f"{valor}{SEPARADOR}{self.tabla[valor]}" if self.codigo else "")
         self.edit.setCursorPosition(0)
         self.edit.setToolTip(self.edit.text())
+
+
+# Provincias del Ecuador (dos primeros dígitos del código de cantón, codificación del INEC).
+PROVINCIAS = {
+    "01": "AZUAY", "02": "BOLÍVAR", "03": "CAÑAR", "04": "CARCHI", "05": "COTOPAXI", "06": "CHIMBORAZO",
+    "07": "EL ORO", "08": "ESMERALDAS", "09": "GUAYAS", "10": "IMBABURA", "11": "LOJA", "12": "LOS RÍOS",
+    "13": "MANABÍ", "14": "MORONA SANTIAGO", "15": "NAPO", "16": "PASTAZA", "17": "PICHINCHA",
+    "18": "TUNGURAHUA", "19": "ZAMORA CHINCHIPE", "20": "GALÁPAGOS", "21": "SUCUMBÍOS", "22": "ORELLANA",
+    "23": "SANTO DOMINGO DE LOS TSÁCHILAS", "24": "SANTA ELENA", "90": "ZONAS NO DELIMITADAS",
+}
+
+
+class ComboCanton(QComboBox):
+    """Lista desplegable con todos los cantones del catálogo de la UAFE.
+
+    Ordenados por nombre, con su provincia (hay nombres repetidos, p. ej. BOLÍVAR en Carchi y en
+    Manabí) y su código. También se puede escribir para filtrar («quito», «1701», «manabí»…)."""
+
+    def __init__(self, tabla: dict[str, str], parent=None, incluir_na: bool = False):
+        from PySide6.QtCore import Qt as _Qt
+
+        super().__init__(parent)
+        self.tabla = tabla
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setMaxVisibleItems(18)
+        items = sorted(((n, c) for c, n in tabla.items() if incluir_na or c != "0000"),
+                       key=lambda nc: (_normal(nc[0]), nc[1]))
+        for nombre, codigo in items:
+            provincia = PROVINCIAS.get(codigo[:2], "")
+            self.addItem(f"{nombre} ({provincia}) — {codigo}" if provincia else f"{nombre} — {codigo}", codigo)
+        c = self.completer()
+        c.setFilterMode(_Qt.MatchContains)
+        c.setCaseSensitivity(_Qt.CaseInsensitive)
+        c.setCompletionMode(QCompleter.PopupCompletion)
+        self.lineEdit().setPlaceholderText("Elija de la lista o escriba el cantón, la provincia o el código…")
+        self.setCurrentIndex(-1)
+
+    def valor(self) -> str:
+        i = self.currentIndex()
+        if i >= 0 and self.currentText() == self.itemText(i):
+            return self.itemData(i) or ""
+        texto = self.currentText().strip()
+        codigo = texto.split("—")[-1].strip()
+        if codigo in self.tabla:
+            return codigo
+        coincidencias = [self.itemData(k) for k in range(self.count()) if _normal(texto) and
+                         _normal(texto) in _normal(self.itemText(k))]
+        return coincidencias[0] if len(coincidencias) == 1 else ""
+
+    def poner_valor(self, codigo: str) -> None:
+        self.setCurrentIndex(self.findData(codigo))
