@@ -282,6 +282,8 @@ class VentanaSimple(QMainWindow):
         self.empresa: emp.Empresa | None = None
         self.lista: list[facturas.Factura] = []
         self._cargando = False
+        # (empresa, año, mes) -> True si se cargan las facturas guardadas; se pregunta una vez por sesión
+        self._decision: dict[tuple[str, int, int], bool] = {}
 
         # --- empresa y mes ---
         self.c_empresa = QComboBox()
@@ -438,14 +440,36 @@ class VentanaSimple(QMainWindow):
         ruta = self._ruta_lista()
         if ruta is not None and ruta.is_file():
             try:
-                self.lista = [imf.factura_de_dict(d) for d in json.loads(ruta.read_text("utf-8"))]
+                guardadas = [imf.factura_de_dict(d) for d in json.loads(ruta.read_text("utf-8"))]
             except (OSError, ValueError, KeyError):
-                self.lista = []
+                guardadas = []
+            clave = (self.empresa.id, self.anio, self.mes)
+            if guardadas and clave not in self._decision:
+                fecha = dt.datetime.fromtimestamp(ruta.stat().st_mtime)
+                self._decision[clave] = self._preguntar_cargar(len(guardadas), fecha)
+            if self._decision.get(clave, True):
+                self.lista = guardadas
         self._mostrar_lista()
+
+    def _preguntar_cargar(self, cantidad: int, fecha: dt.datetime) -> bool:
+        """¿Cargar las facturas guardadas de este mes? (se pregunta una vez por empresa y mes)."""
+        caja = QMessageBox(self)
+        caja.setIcon(QMessageBox.Question)
+        caja.setWindowTitle("Facturas guardadas")
+        caja.setTextFormat(Qt.RichText)
+        caja.setText(f"<b>{self.empresa.nombre} — {MESES[self.mes - 1]} {self.anio}</b><br><br>"
+                     f"Este mes tiene <b>{cantidad} factura(s) guardada(s)</b> "
+                     f"(última modificación: {fecha:%d/%m/%Y %H:%M}).")
+        cargar = caja.addButton("Cargar las facturas", QMessageBox.AcceptRole)
+        caja.addButton("Empezar de cero", QMessageBox.RejectRole)
+        caja.setDefaultButton(cargar)
+        caja.exec()
+        return caja.clickedButton() is cargar
 
     def _guardar_lista(self) -> None:
         ruta = self._ruta_lista()
         if ruta is not None:
+            self._decision[(self.empresa.id, self.anio, self.mes)] = True   # lo guardado es la lista actual
             ruta.write_text(json.dumps([imf.factura_a_dict(f) for f in self.lista], ensure_ascii=False, indent=1),
                             "utf-8")
 

@@ -5,7 +5,20 @@ from fabrica import CODIGO
 from resuapp import empresas, facturas, importar_facturas as imf, reglas
 from resuapp.modelo import Reporte
 
+import pytest
+
 RUC_EMPRESA = "1799999907001"
+
+
+@pytest.fixture(autouse=True)
+def _cargar_guardadas_sin_preguntar(monkeypatch):
+    """En las pruebas, la pregunta «¿cargar las facturas guardadas?» responde «Cargar»."""
+    from resuapp.ui import simple
+
+    respuestas: list = []
+    monkeypatch.setattr(simple.VentanaSimple, "_preguntar_cargar",
+                        lambda self, n, fecha: respuestas.append(n) or getattr(self, "_respuesta_prueba", True))
+    return respuestas
 CLIENTE = "1799999915001"
 
 
@@ -377,3 +390,44 @@ def test_abre_limpia_y_ayuda(datos, uafi_zip):
     assert v2.tabla.rowCount() == 1
     assert "Flechita" in simple.AYUDA and "Generar Excel" in simple.AYUDA
     v2.close()
+
+
+def test_pregunta_si_cargar_las_guardadas(datos, uafi_zip, _cargar_guardadas_sin_preguntar):
+    from PySide6.QtWidgets import QApplication
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    preguntas = _cargar_guardadas_sin_preguntar
+    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    v.lista = [_factura("000000001"), _factura("000000002")]
+    v._guardar_lista()
+    v.close()
+    # «Empezar de cero»: tabla vacía, y no vuelve a preguntar en la sesión
+    v2 = simple.VentanaSimple()
+    v2._respuesta_prueba = False
+    v2.c_empresa.setCurrentIndex(1)
+    v2.s_anio.setValue(2026)
+    preguntas.clear()
+    v2.c_mes.setCurrentIndex(1)
+    assert preguntas == [2] and v2.tabla.rowCount() == 0
+    v2.c_mes.setCurrentIndex(2)
+    v2.c_mes.setCurrentIndex(1)
+    assert preguntas == [2] and v2.tabla.rowCount() == 0      # no insiste
+    # si agrega facturas después de empezar de cero, esas son las que quedan
+    v2.lista = [_factura("000000009")]
+    v2._guardar_lista()
+    v2.c_mes.setCurrentIndex(2)
+    v2.c_mes.setCurrentIndex(1)
+    assert v2.tabla.rowCount() == 1
+    # «Cargar las facturas»
+    v3 = simple.VentanaSimple()
+    v3.c_empresa.setCurrentIndex(1)
+    v3.s_anio.setValue(2026)
+    v3.c_mes.setCurrentIndex(1)
+    assert v3.tabla.rowCount() == 1
+    v2.close(); v3.close()
