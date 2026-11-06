@@ -154,3 +154,105 @@ def test_ventana_simple(datos, uafi_zip, tmp_path, monkeypatch):
     v2.s_anio.setValue(2026)
     assert len(v2.lista) == 1                                   # la lista del mes queda guardada
     v.close(); v2.close()
+
+
+# --- datos del RESU por factura ------------------------------------------------------------
+
+def _factura(secuencial="000000123", forma="20", total="1000", cliente=CLIENTE, resu=None):
+    f = facturas.Factura("f.xml", ruc_emisor=RUC_EMPRESA, tipo_id_cliente="04", id_cliente=cliente,
+                         nombre_cliente="Cliente Ficticio S.A.", direccion_cliente="AV. AMAZONAS Y PATRIA QUITO",
+                         estab="001", pto_emi="001", secuencial=secuencial, fecha=dt.date(2026, 2, 15),
+                         clave_acceso=clave(secuencial=secuencial), total=Decimal(total),
+                         pagos=[(forma, Decimal(total))] if forma else [])
+    f.resu = dict(resu or {})
+    return f
+
+
+def test_valores_por_factura_y_su_origen():
+    from fabrica import cliente, operacion, reporte, transaccion
+
+    op = imf.Opciones(ttr="103", ttb="OFI", adb="0", instrumento_20="VDE", ccc="1701")
+    # sin nada previo: valores por defecto; el cantón, el del cliente
+    v = imf.valores_factura(_factura(), op, {}, canton_cliente="0901")
+    assert v["ttr"] == ("103", imf.DEFECTO) and v["inst"] == ("VDE", imf.DEFECTO)
+    assert v["ttb"] == ("OFI", imf.DEFECTO) and v["cco"] == ("0901", imf.CLIENTE)
+    # con un reporte anterior del mismo cliente: se toma lo que se usó entonces
+    anterior = reporte(cliente(operacion(transaccion(TTR="96", VCH="12000", VVT="12000"), TTB="DEP", ADB="95",
+                                         CCO="1701"), IDE=CLIENTE))
+    previos = imf.ultimos_por_cliente([anterior], antes_de="20260331")
+    v = imf.valores_factura(_factura(), op, previos, canton_cliente="0901")
+    assert v["ttr"] == ("96", imf.ANTERIOR) and v["inst"] == ("VCH", imf.ANTERIOR)
+    assert (v["ttb"], v["adb"], v["cco"]) == (("DEP", imf.ANTERIOR), ("95", imf.ANTERIOR), ("1701", imf.ANTERIOR))
+    assert imf.ultimos_por_cliente([anterior], antes_de="20260228") == {}   # el del mismo mes no cuenta
+    # la forma de pago de la factura manda sobre lo anterior (tarjeta de crédito)
+    assert imf.valores_factura(_factura(forma="19"), op, previos)["inst"] == ("VTC", imf.PAGO)
+    # lo elegido para la factura manda sobre todo
+    v = imf.valores_factura(_factura(forma="19", resu={"inst": "VEF", "ttb": "LOC"}), op, previos)
+    assert v["inst"] == ("VEF", imf.FACTURA) and v["ttb"] == ("LOC", imf.FACTURA)
+    # varias formas de pago sin elección: se reparte
+    f = _factura()
+    f.pagos = [("19", Decimal("600")), ("20", Decimal("400"))]
+    assert imf.valores_factura(f, op, previos)["inst"] == ("", imf.VARIOS)
+
+
+def test_cada_factura_con_sus_datos_en_el_reporte(datos, uafi_zip):
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    op = imf.Opciones(ttr="96", ttb="DEP", adb="0", instrumento_20="VDE", aec="L6810", ccc="1701")
+    a = _factura("000000001", total="1000")                                  # por defecto
+    b = _factura("000000002", total="2500", resu={"ttr": "94", "inst": "VCH", "ttb": "LOC", "adb": "120",
+                                                   "cco": "0901"})           # elegido para esta factura
+    rep, _ = imf.construir_reporte(e, 2026, 2, [a, b], op)
+    ops = {o.get("NCT"): o for c in rep.clientes for o in c.hijos}
+    oa, ob = ops["001-001-000000001"], ops["001-001-000000002"]
+    assert (oa.get("TTB"), oa.get("ADB"), oa.get("CCO"), oa.hijos[0].get("TTR"), oa.hijos[0].get("VDE")) == \
+        ("DEP", "0", "1701", "96", "1000")
+    assert (ob.get("TTB"), ob.get("ADB"), ob.get("CCO"), ob.hijos[0].get("TTR"), ob.hijos[0].get("VCH"),
+            ob.hijos[0].get("VDE")) == ("LOC", "120", "0901", "94", "2500", "0")
+    assert len(rep.clientes) == 1   # mismo cliente: una sola ficha, dos operaciones
+    # las elecciones se guardan con la lista del mes
+    assert imf.factura_de_dict(imf.factura_a_dict(b)).resu == b.resu
+
+
+def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    from resuapp.ui import simple
+    from resuapp.ui.simple import VentanaSimple
+
+    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = VentanaSimple()
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    v.lista = [_factura("000000001"), _factura("000000002"), _factura("000000003", cliente="1799999923001")]
+    v._guardar_lista()
+    v._mostrar_lista()
+    ttb_defecto = v.tabla.item(0, simple.C_TTB).data(simple.Qt.UserRole)
+    assert v.tabla.item(0, simple.C_TTB).font().italic()            # por defecto: en cursiva
+    # cambiar el tipo de bien de una sola factura
+    v.cambiar_campo(0, "ttb", "LOC")
+    assert v.tabla.item(0, simple.C_TTB).data(simple.Qt.UserRole) == "LOC"
+    assert not v.tabla.item(0, simple.C_TTB).font().italic()
+    assert v.tabla.item(1, simple.C_TTB).data(simple.Qt.UserRole) == ttb_defecto
+    # con dos filas seleccionadas, el cambio va a las dos
+    v.tabla.clearSelection()
+    for r in (1, 2):
+        v.tabla.selectionModel().select(v.tabla.model().index(r, simple.C_ADB),
+                                        simple.QItemSelectionModel.Select | simple.QItemSelectionModel.Rows)
+    v.cambiar_campo(1, "adb", "150")
+    assert [v.tabla.item(r, simple.C_ADB).text() for r in range(3)][1:] == ["150", "150"]
+    # aplicar a todas las facturas del mismo cliente
+    v.aplicar_al_cliente(0, "ttb")
+    assert [f.resu.get("ttb") for f in v.lista[:2]] == ["LOC", "LOC"] and "ttb" not in v.lista[2].resu
+    # volver al automático
+    v.volver_automatico([0], "ttb")
+    assert "ttb" not in v.lista[0].resu
+    # al reabrir el mes, las elecciones siguen ahí
+    v2 = VentanaSimple()
+    v2.c_mes.setCurrentIndex(1)
+    v2.s_anio.setValue(2026)
+    assert [f.resu.get("adb") for f in v2.lista] == [None, "150", "150"]
+    assert v2.tabla.item(1, simple.C_ADB).text() == "150"
+    v.close(); v2.close()

@@ -47,6 +47,8 @@ class Factura:
     clave_acceso: str = ""
     total: Decimal = Decimal(0)
     pagos: list[tuple[str, Decimal]] = field(default_factory=list)   # (forma de pago SRI, valor)
+    # Datos del RESU elegidos por el usuario para esta factura (ttr, inst, ttb, adb, cco); vacío = automático
+    resu: dict[str, str] = field(default_factory=dict)
 
     @property
     def numero(self) -> str:

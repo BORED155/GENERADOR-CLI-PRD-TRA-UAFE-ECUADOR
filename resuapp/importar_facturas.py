@@ -58,6 +58,10 @@ class Propuesta:
     incluir: bool = True
     ttr: str = ""
     instrumento: str = ""          # instrumento principal (si la factura tiene una sola forma de pago)
+    instrumento_fijo: bool = False  # el usuario lo eligió: todo el valor va a ese instrumento
+    ttb: str = ""
+    adb: str = ""
+    cco: str = ""
     cliente: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -106,6 +110,70 @@ def opciones_sugeridas(empresa: Empresa, reportes_previos: list[Reporte]) -> Opc
     return op
 
 
+# ----------------------------------------------------------------------
+# Datos del RESU por factura
+#   Cada factura es una operación (tipo de bien, área, cantón) con una transacción (tipo de
+#   transacción e instrumento de pago). El valor de cada campo sale, en este orden, de:
+#     1. lo que el usuario eligió para esa factura (Factura.resu),
+#     2. la forma de pago de la factura (solo el instrumento, si no es la 20),
+#     3. la última operación de ese mismo cliente en un reporte anterior,
+#     4. el valor por defecto.
+CAMPOS_FACTURA = ("ttr", "inst", "ttb", "adb", "cco")
+FACTURA, PAGO, ANTERIOR, DEFECTO, CLIENTE, VARIOS = "factura", "pago", "anterior", "defecto", "cliente", "varios"
+
+
+def ultimos_por_cliente(reportes: list[Reporte], antes_de: str = "") -> dict[str, dict[str, str]]:
+    """Último tipo de transacción, instrumento, tipo de bien, área y cantón usados con cada cliente.
+
+    Solo reportes de periodos anteriores a `antes_de` (AAAAMMDD), del más viejo al más nuevo."""
+    salida: dict[str, dict[str, str]] = {}
+    for rep in sorted(reportes, key=lambda r: r.periodo):
+        if antes_de and rep.periodo >= antes_de:
+            continue
+        for c in rep.clientes:
+            ide = c.get("IDE")
+            if not ide:
+                continue
+            for op in c.hijos:
+                d = {"ttb": op.get("TTB"), "adb": op.get("ADB"), "cco": op.get("CCO"), "_periodo": rep.periodo}
+                for t in op.hijos:
+                    d["ttr"] = t.get("TTR")
+                    usados = [n for n in INSTRUMENTOS if (t.get(n) or "0") not in ("", "0")]
+                    if len(usados) == 1:
+                        d["inst"] = usados[0]
+                salida[ide] = {k: v for k, v in d.items() if v}
+    return salida
+
+
+def valores_factura(f: Factura, opciones: Opciones, anteriores: dict[str, dict[str, str]] | None = None,
+                    canton_cliente: str = "") -> dict[str, tuple[str, str]]:
+    """campo -> (valor, origen) para los datos del RESU de una factura."""
+    previo = (anteriores or {}).get(f.id_cliente, {})
+    elegido = f.resu or {}
+    defecto = {"ttr": opciones.ttr, "inst": opciones.instrumento_20, "ttb": opciones.ttb, "adb": opciones.adb,
+               "cco": canton_cliente or opciones.ccc}
+    salida: dict[str, tuple[str, str]] = {}
+    for campo in CAMPOS_FACTURA:
+        if elegido.get(campo):
+            salida[campo] = (elegido[campo], FACTURA)
+            continue
+        if campo == "inst":
+            formas = [c for c, v in f.pagos if v > 0] or [c for c, _v in f.pagos]
+            if len(formas) > 1:
+                salida[campo] = ("", VARIOS)  # se reparte según las formas de pago
+                continue
+            if formas and formas[0] in INSTRUMENTO_POR_FORMA:
+                salida[campo] = (INSTRUMENTO_POR_FORMA[formas[0]], PAGO)
+                continue
+        if previo.get(campo):
+            salida[campo] = (previo[campo], ANTERIOR)
+        elif campo == "cco" and canton_cliente:
+            salida[campo] = (canton_cliente, CLIENTE)
+        else:
+            salida[campo] = (defecto[campo], DEFECTO)
+    return salida
+
+
 def canton_por_direccion(direccion: str, cantones: dict[str, str]) -> str:
     """Busca el nombre de un cantón dentro de la dirección ('PICHINCHA / QUITO / …' -> 1701)."""
     texto = " " + re.sub(r"[^A-Z0-9]+", " ", sin_tildes(direccion.upper())) + " "
@@ -148,7 +216,8 @@ def _datos_cliente(f: Factura, empresa: Empresa, rep: Reporte) -> tuple[dict[str
     return v, notas
 
 
-def analizar(leidos: list[Factura | NoLeido], empresa: Empresa, rep: Reporte, opciones: Opciones) -> list[Propuesta]:
+def analizar(leidos: list[Factura | NoLeido], empresa: Empresa, rep: Reporte, opciones: Opciones,
+             anteriores: dict[str, dict[str, str]] | None = None) -> list[Propuesta]:
     propuestas: list[Propuesta] = []
     vistos: set[str] = set()
     ya_en_reporte = {(c.get("IDE"), t.get("NFA")) for c in rep.clientes for o in c.hijos for t in o.hijos}
@@ -194,10 +263,15 @@ def analizar(leidos: list[Factura | NoLeido], empresa: Empresa, rep: Reporte, op
             continue
         p.cliente, notas = _datos_cliente(f, empresa, rep)
         p.observaciones += notas
+        v = valores_factura(f, opciones, anteriores, p.cliente.get("CCC", ""))
+        p.ttr = v["ttr"][0]
+        p.ttb, p.adb = v["ttb"][0], v["adb"][0]
+        p.cco = v["cco"][0] if v["cco"][1] != CLIENTE else ""   # vacío: el del cliente
+        inst, origen = v["inst"]
+        p.instrumento = inst or opciones.instrumento_20
+        p.instrumento_fijo = origen == FACTURA  # elegido a mano: todo el valor va a ese instrumento
         formas = [c for c, _v in f.pagos]
-        p.instrumento = INSTRUMENTO_POR_FORMA.get(formas[0], opciones.instrumento_20) if formas else \
-            opciones.instrumento_20
-        if not formas and f.origen != "txt":
+        if not formas and f.origen != "txt" and origen == DEFECTO:
             p.observaciones.append("La factura no indica la forma de pago: se usa la elegida arriba")
         revisar(p, opciones)
     return propuestas
@@ -222,7 +296,7 @@ def instrumentos(p: Propuesta, opciones: Opciones) -> dict[str, int]:
     total = int(f.total)
     valores = dict.fromkeys(INSTRUMENTOS, 0)
     pagos = [(c, v) for c, v in f.pagos if v > 0]
-    if len(pagos) <= 1:
+    if len(pagos) <= 1 or p.instrumento_fijo:
         valores[p.instrumento or opciones.instrumento_20] = total
         return valores
     for codigo, valor in pagos:
@@ -252,8 +326,9 @@ def aplicar(rep: Reporte, propuestas: list[Propuesta], empresa: Empresa, opcione
                     cliente.valores[k] = v
         fecha = f.fecha.strftime("%Y%m%d")
         total = str(int(f.total))
-        operacion = Registro({"NCT": f.numero, "VTO": total, "FDO": fecha, "TTB": opciones.ttb, "ADB": opciones.adb,
-                              "DRB": cliente.get("DIR"), "CCO": cliente.get("CCC"), "PUB": "EC"})
+        operacion = Registro({"NCT": f.numero, "VTO": total, "FDO": fecha, "TTB": p.ttb or opciones.ttb,
+                              "ADB": p.adb or opciones.adb, "DRB": cliente.get("DIR"),
+                              "CCO": p.cco or cliente.get("CCC"), "PUB": "EC"})
         valores = {k: str(v) for k, v in instrumentos(p, opciones).items()}
         operacion.hijos.append(Registro({
             "FTR": fecha, "NFA": f.numero, **valores, "VVT": total, "MND": "USD", "CAT": empresa.agencia_defecto(),
@@ -292,10 +367,11 @@ def completar_por_defecto(cliente: dict[str, str], empresa: Empresa, opciones: O
 
 
 def construir_reporte(empresa: Empresa, anio: int, mes: int, lista: list[Factura],
-                      opciones: Opciones) -> tuple[Reporte, list[Propuesta]]:
-    """Reporte RESU completo a partir de las facturas del mes."""
+                      opciones: Opciones, anteriores: dict[str, dict[str, str]] | None = None
+                      ) -> tuple[Reporte, list[Propuesta]]:
+    """Reporte RESU completo a partir de las facturas del mes (con los datos elegidos por factura)."""
     rep = Reporte(empresa.codigo, anio, mes)
-    propuestas = analizar(list(lista), empresa, rep, opciones)
+    propuestas = analizar(list(lista), empresa, rep, opciones, anteriores)
     for p in propuestas:
         if p.estado != OMITIR:
             p.observaciones = []
@@ -315,7 +391,8 @@ def factura_a_dict(f: Factura) -> dict:
             "tipo_id_cliente": f.tipo_id_cliente, "id_cliente": f.id_cliente, "nombre_cliente": f.nombre_cliente,
             "direccion_cliente": f.direccion_cliente, "estab": f.estab, "pto_emi": f.pto_emi,
             "secuencial": f.secuencial, "fecha": f.fecha.isoformat() if f.fecha else "",
-            "clave_acceso": f.clave_acceso, "total": str(f.total), "pagos": [[c, str(v)] for c, v in f.pagos]}
+            "clave_acceso": f.clave_acceso, "total": str(f.total), "pagos": [[c, str(v)] for c, v in f.pagos],
+            "resu": {k: v for k, v in (f.resu or {}).items() if v}}
 
 
 def factura_de_dict(d: dict) -> Factura:
@@ -327,4 +404,5 @@ def factura_de_dict(d: dict) -> Factura:
     f.fecha = dt.date.fromisoformat(d["fecha"]) if d.get("fecha") else None
     f.total = Decimal(d.get("total") or "0")
     f.pagos = [(c, Decimal(v)) for c, v in d.get("pagos", [])]
+    f.resu = {k: v for k, v in (d.get("resu") or {}).items() if k in CAMPOS_FACTURA and v}
     return f

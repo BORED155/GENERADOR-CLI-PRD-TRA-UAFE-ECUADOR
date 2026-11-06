@@ -6,7 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QSettings, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
@@ -23,9 +23,21 @@ from .empresas import DialogoEmpresas
 
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
          "Noviembre", "Diciembre"]
-COLUMNAS = ["Cliente", "RUC / cédula", "Actividad económica", "Factura", "Fecha", "Total", "Forma de pago",
-            "Archivo"]
-C_RUC, C_AEC, C_TOTAL, C_FP = 1, 2, 5, 6
+COLUMNAS = ["Cliente", "RUC / cédula", "Actividad económica", "Tipo de transacción", "Pago", "Tipo de bien",
+            "Área del bien (m²)", "Cantón", "Factura", "Fecha", "Total", "Forma de pago (SRI)", "Archivo"]
+C_RUC, C_AEC, C_TTR, C_INST, C_TTB, C_ADB, C_CCO, C_TOTAL, C_FP = 1, 2, 3, 4, 5, 6, 7, 10, 11
+# columna -> campo de la factura (importar_facturas.CAMPOS_FACTURA)
+CAMPO_COLUMNA = {C_TTR: "ttr", C_INST: "inst", C_TTB: "ttb", C_ADB: "adb", C_CCO: "cco"}
+NOMBRE_CAMPO = {"ttr": "tipo de transacción", "inst": "pago", "ttb": "tipo de bien", "adb": "área del bien",
+                "cco": "cantón"}
+ORIGEN = {
+    imf.FACTURA: ("Elegido para esta factura", None, False),
+    imf.PAGO: ("Según la forma de pago de la factura", None, False),
+    imf.ANTERIOR: ("Como en el reporte de {periodo} de este cliente", "#1f4e9c", False),
+    imf.CLIENTE: ("Cantón del cliente (de su dirección o de su ficha)", None, False),
+    imf.DEFECTO: ("Valor por defecto (cuadro de abajo)", "#888888", True),
+    imf.VARIOS: ("Se reparte según las formas de pago de la factura", "#888888", True),
+}
 URL_CONSULTA_RUC = "https://srienlinea.sri.gob.ec/sri-en-linea/SriRucWeb/ConsultaRuc/Consultas/consultaRuc"
 MARCA = ("Arrastre aquí los XML o PDF de sus facturas de venta del mes\n"
          "(también carpetas, ZIP o el TXT de comprobantes emitidos del SRI)")
@@ -57,6 +69,73 @@ class DelegadoActividad(QStyledItemDelegate):
         codigo = editor.valor()
         if codigo and codigo != (index.data(Qt.UserRole) or "") and index.row() < len(self.ventana.lista):
             self.ventana.guardar_actividad(self.ventana.lista[index.row()], codigo)
+
+
+class DelegadoOpciones(QStyledItemDelegate):
+    """Lista desplegable dentro de la celda (tipo de transacción, pago, tipo de bien)."""
+
+    def __init__(self, ventana: "VentanaSimple", campo: str):
+        super().__init__(ventana)
+        self.ventana, self.campo = ventana, campo
+
+    def createEditor(self, parent, option, index):
+        c = QComboBox(parent)
+        for codigo, nombre in self.ventana.opciones_campo(self.campo).items():
+            c.addItem(f"{codigo} — {nombre}" if self.campo != "inst" else nombre, codigo)
+        c.activated.connect(lambda _i, ed=c: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
+        return c
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentIndex(max(editor.findData(index.data(Qt.UserRole) or ""), 0))
+        editor.showPopup()
+
+    def setModelData(self, editor, model, index):
+        self.ventana.cambiar_campo(index.row(), self.campo, editor.currentData() or "")
+
+
+class DelegadoArea(QStyledItemDelegate):
+    def __init__(self, ventana: "VentanaSimple"):
+        super().__init__(ventana)
+        self.ventana = ventana
+
+    def createEditor(self, parent, option, index):
+        from PySide6.QtGui import QIntValidator
+
+        e = QLineEdit(parent)
+        e.setValidator(QIntValidator(0, 99_999_999, e))
+        e.setPlaceholderText("m²")
+        return e
+
+    def setEditorData(self, editor, index):
+        editor.setText(index.data(Qt.UserRole) or "")
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        valor = entero(editor.text()) or "0"
+        self.ventana.cambiar_campo(index.row(), "adb", valor)
+
+
+class DelegadoCanton(QStyledItemDelegate):
+    def __init__(self, ventana: "VentanaSimple"):
+        super().__init__(ventana)
+        self.ventana = ventana
+
+    def createEditor(self, parent, option, index):
+        editor = ControlBuscador(None, self.ventana.empresa.catalogos.tabla("C"),
+                                 "Escriba el cantón (ej.: Quito) o su código…", parent)
+        editor.setAutoFillBackground(True)
+        editor.completer.activated.connect(lambda _t, ed=editor: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
+        return editor
+
+    def setEditorData(self, editor, index):
+        editor.edit.setPlaceholderText(f"Actual: {index.data()}  — escriba para buscar otro")
+        editor.codigo = ""
+        editor.edit.clear()
+        editor.edit.setFocus()
+
+    def setModelData(self, editor, model, index):
+        if editor.valor():
+            self.ventana.cambiar_campo(index.row(), "cco", editor.valor())
 
 
 class TablaFacturas(QTableWidget):
@@ -132,6 +211,12 @@ class VentanaSimple(QMainWindow):
                          "(pegue con Ctrl+V) para ver su actividad económica.")
         b_sri.clicked.connect(lambda: self.consultar_ruc())
         self.tabla.setItemDelegateForColumn(C_AEC, DelegadoActividad(self))
+        for col, campo in ((C_TTR, "ttr"), (C_INST, "inst"), (C_TTB, "ttb")):
+            self.tabla.setItemDelegateForColumn(col, DelegadoOpciones(self, campo))
+        self.tabla.setItemDelegateForColumn(C_ADB, DelegadoArea(self))
+        self.tabla.setItemDelegateForColumn(C_CCO, DelegadoCanton(self))
+        self.anteriores: dict[str, dict[str, str]] = {}
+        self.previos: list[Reporte] = []
         self.tabla.cellDoubleClicked.connect(self._doble_clic)
         self.tabla.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabla.customContextMenuRequested.connect(self._menu_tabla)
@@ -146,7 +231,7 @@ class VentanaSimple(QMainWindow):
         botones_lista.addWidget(self.resumen)
 
         # --- valores por defecto ---
-        self.caja = QGroupBox("Datos que las facturas no traen (se usan para todas; el programa los recuerda)")
+        self.caja = QGroupBox("Valores por defecto")
         self.rejilla = QGridLayout(self.caja)
         self.controles: dict[str, QWidget] = {}
 
@@ -212,6 +297,10 @@ class VentanaSimple(QMainWindow):
         return self.empresa.carpeta_reportes / f"FACTURAS{self.empresa.codigo}{periodo(self.anio, self.mes)}.json"
 
     def _cargar_lista(self) -> None:
+        from ..modelo import periodo as _periodo
+
+        self.anteriores = imf.ultimos_por_cliente(self.previos, antes_de=_periodo(self.anio, self.mes)) \
+            if self.empresa else {}
         self.lista = []
         ruta = self._ruta_lista()
         if ruta is not None and ruta.is_file():
@@ -227,20 +316,62 @@ class VentanaSimple(QMainWindow):
             ruta.write_text(json.dumps([imf.factura_a_dict(f) for f in self.lista], ensure_ascii=False, indent=1),
                             "utf-8")
 
+    def _canton_cliente(self, f: facturas.Factura, directorio: dict) -> str:
+        datos = directorio.get(f.id_cliente, {})
+        if datos.get("CCC"):
+            return datos["CCC"]
+        direccion = datos.get("DIR") or f.direccion_cliente
+        return imf.canton_por_direccion(direccion, self.empresa.catalogos.tabla("C")) if direccion else ""
+
+    def opciones_campo(self, campo: str) -> dict[str, str]:
+        cat = self.empresa.catalogos
+        if campo == "ttr":
+            return dict(sorted(cat.tabla("TT").items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
+        if campo == "ttb":
+            return dict(sorted(cat.tabla("TB").items()))
+        if campo == "inst":
+            return dict(imf.NOMBRE_INSTRUMENTO)
+        if campo == "cco":
+            return cat.tabla("C")
+        return {}
+
+    def _texto_campo(self, campo: str, valor: str) -> str:
+        cat = self.empresa.catalogos
+        def con_nombre(tabla: str) -> str:
+            nombre = cat.nombre(tabla, valor)
+            return f"{valor} — {nombre}" if nombre else valor
+
+        if campo == "ttr":
+            return con_nombre("TT") if valor else ""
+        if campo == "ttb":
+            return con_nombre("TB") if valor else ""
+        if campo == "inst":
+            return imf.NOMBRE_INSTRUMENTO.get(valor, valor) if valor else "Varios (según la factura)"
+        if campo == "cco":
+            return f"{cat.nombre('C', valor) or valor} ({valor})" if valor else ""
+        return valor
+
     def _mostrar_lista(self) -> None:
+        from ..reglas import INSTRUMENTOS_POR_TRANSACCION
+
         self.lista.sort(key=lambda f: (f.fecha or dt.date.min, f.numero))
         directorio = self.empresa.directorio_clientes() if self.empresa else {}
         cat = self.empresa.catalogos if self.empresa else None
+        opciones = self._opciones() if self.controles else imf.Opciones()
+        cursiva = self.tabla.font()
+        cursiva.setItalic(True)
         self.tabla.setRowCount(len(self.lista))
         for fila, f in enumerate(self.lista):
             formas = ", ".join(f"{c} {imf.FORMAS_PAGO_SRI.get(c, '')}".strip() for c, _v in f.pagos) or "—"
             aec = directorio.get(f.id_cliente, {}).get("AEC", "")
             actividad = f"{aec} — {cat.nombre('AE', aec)}" if aec else "(la de por defecto)"
-            valores = [f.nombre_cliente, f.id_cliente, actividad, f.numero,
+            v = imf.valores_factura(f, opciones, self.anteriores, self._canton_cliente(f, directorio))
+            valores = [f.nombre_cliente, f.id_cliente, actividad, "", "", "", "", "", f.numero,
                        f.fecha.strftime("%d/%m/%Y") if f.fecha else "", f"{f.total:,.2f}", formas, f.archivo]
             for col, texto in enumerate(valores):
                 item = QTableWidgetItem(texto)
-                item.setToolTip({C_AEC: f"{texto}\nDoble clic para escribir y buscar la actividad",
+                item.setToolTip({C_AEC: f"{texto}\nDoble clic para escribir y buscar la actividad\n"
+                                        "(una por cliente: vale para todas sus facturas)",
                                  C_RUC: f"{texto}\nDoble clic para copiarlo"}.get(col, texto))
                 if col == C_AEC:
                     item.setData(Qt.UserRole, aec)
@@ -250,8 +381,34 @@ class VentanaSimple(QMainWindow):
                 if col == C_AEC and not aec:
                     item.setForeground(QColor("#888888"))
                 self.tabla.setItem(fila, col, item)
+            for col, campo in CAMPO_COLUMNA.items():
+                valor, origen = v[campo]
+                item = QTableWidgetItem(self._texto_campo(campo, valor))
+                item.setData(Qt.UserRole, valor)
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                explicacion, color, en_cursiva = ORIGEN[origen]
+                periodo_ant = self.anteriores.get(f.id_cliente, {}).get("_periodo", "")
+                explicacion = explicacion.format(periodo=f"{periodo_ant[4:6]}/{periodo_ant[:4]}" if periodo_ant else "")
+                if color:
+                    item.setForeground(QColor(color))
+                if en_cursiva:
+                    item.setFont(cursiva)
+                item.setToolTip(f"{item.text()}\n{explicacion}\nDoble clic para cambiarlo "
+                                "(con varias filas seleccionadas, cambia todas)")
+                if campo == "adb":
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.tabla.setItem(fila, col, item)
+            # tipo de transacción que no admite ese pago (tabla 2 del manual)
+            permitidos = INSTRUMENTOS_POR_TRANSACCION.get(v["ttr"][0])
+            inst = v["inst"][0]
+            if permitidos is not None and inst and inst not in permitidos:
+                for col in (C_TTR, C_INST):
+                    it = self.tabla.item(fila, col)
+                    it.setBackground(QColor("#f8d7da"))
+                    it.setToolTip(f"{it.toolTip()}\n⚠ El tipo de transacción {v['ttr'][0]} no admite pago con "
+                                  f"{imf.NOMBRE_INSTRUMENTO.get(inst, inst).lower()}.")
         self.tabla.resizeColumnsToContents()
-        for col, ancho in ((0, 340), (C_AEC, 300), (C_FP, 240)):
+        for col, ancho in ((0, 300), (C_AEC, 260), (C_TTR, 230), (C_TTB, 200), (C_CCO, 170), (C_FP, 240)):
             self.tabla.setColumnWidth(col, min(self.tabla.columnWidth(col), ancho))
         clientes = {f.id_cliente for f in self.lista}
         total = sum(int(f.total) for f in self.lista)
@@ -263,12 +420,50 @@ class VentanaSimple(QMainWindow):
         nombre = f" — {self.empresa.nombre} — {MESES[self.mes - 1]} {self.anio}" if hay else ""
         self.setWindowTitle("Generador RESU UAFE" + nombre)
 
+    def _filas_objetivo(self, fila: int) -> list[int]:
+        """La fila editada y, si está entre las seleccionadas, todas las seleccionadas."""
+        seleccion = sorted({i.row() for i in self.tabla.selectedIndexes()})
+        return seleccion if fila in seleccion and len(seleccion) > 1 else [fila]
+
+    def cambiar_campo(self, fila: int, campo: str, valor: str) -> None:
+        if not valor or fila >= len(self.lista):
+            return
+        filas = self._filas_objetivo(fila)
+        for r in filas:
+            self.lista[r].resu[campo] = valor
+        self._guardar_lista()
+        self._mostrar_lista()
+        self.statusBar().showMessage(f"{NOMBRE_CAMPO[campo].capitalize()} cambiado en {len(filas)} factura(s).", 6000)
+
+    def volver_automatico(self, filas: list[int], campo: str) -> None:
+        for r in filas:
+            self.lista[r].resu.pop(campo, None)
+        self._guardar_lista()
+        self._mostrar_lista()
+
+    def aplicar_al_cliente(self, fila: int, campo: str) -> None:
+        f = self.lista[fila]
+        valor = self.tabla.item(fila, next(c for c, k in CAMPO_COLUMNA.items() if k == campo)).data(Qt.UserRole)
+        if not valor:
+            return
+        n = 0
+        for otra in self.lista:
+            if otra.id_cliente == f.id_cliente:
+                otra.resu[campo] = valor
+                n += 1
+        self._guardar_lista()
+        self._mostrar_lista()
+        self.statusBar().showMessage(f"{NOMBRE_CAMPO[campo].capitalize()} aplicado a {n} factura(s) de "
+                                     f"{f.nombre_cliente}.", 6000)
+
     # ------------------------------------------------------------------
     # Valores por defecto
     def _construir_opciones(self) -> None:
         while self.rejilla.count():
             w = self.rejilla.takeAt(0).widget()
             if w is not None:
+                w.hide()            # que no quede dibujado encima mientras se borra
+                w.setParent(None)
                 w.deleteLater()
         self.controles = {}
         self.caja.setEnabled(self.empresa is not None)
@@ -281,6 +476,7 @@ class VentanaSimple(QMainWindow):
                 previos.append(Reporte.abrir(ruta))
             except (OSError, ValueError, KeyError):
                 pass
+        self.previos = previos
         op = imf.opciones_sugeridas(e, previos)
         cliente = e.estructura.niveles[0]
         tipos_tx = dict(sorted(cat.tabla("TT").items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
@@ -305,11 +501,16 @@ class VentanaSimple(QMainWindow):
         c_ccc.poner_valor(op.ccc)
         self.controles = {"ttr": c_ttr, "ttb": c_ttb, "adb": e_adb, "instrumento_20": c_inst, "aec": c_aec,
                           "ccc": c_ccc, "agencia": e_cat}
+        nota = QLabel("Se usan en las facturas que no tienen un valor elegido ni datos de un mes anterior del mismo "
+                      "cliente (en la tabla salen <i>en gris</i>; los de un mes anterior, <span style='color:#1f4e9c'>"
+                      "en azul</span>). Doble clic en una celda de la tabla para cambiar solo esa factura.")
+        nota.setWordWrap(True)
+        self.rejilla.addWidget(nota, 0, 0, 1, 4)
         filas = [("Tipo de transacción:", c_ttr, "Tipo de bien:", c_ttb),
                  ("Pago «20 - otros con sistema financiero» como:", c_inst, "Área del bien (m²):", e_adb),
                  ("Actividad económica (clientes nuevos):", c_aec, "Código de agencia:", e_cat),
                  ("Cantón (si la dirección no lo dice):", c_ccc, "", None)]
-        for r, (t1, w1, t2, w2) in enumerate(filas):
+        for r, (t1, w1, t2, w2) in enumerate(filas, start=1):
             self.rejilla.addWidget(QLabel(t1), r, 0, Qt.AlignRight)
             self.rejilla.addWidget(w1, r, 1)
             if w2 is not None:
@@ -317,6 +518,12 @@ class VentanaSimple(QMainWindow):
                 self.rejilla.addWidget(w2, r, 3)
         self.rejilla.setColumnStretch(1, 3)
         self.rejilla.setColumnStretch(3, 1)
+        # al cambiar un valor por defecto, la tabla muestra el nuevo en las facturas que lo usan
+        for combo in (c_ttr, c_ttb, c_inst):
+            combo.currentIndexChanged.connect(lambda _i: self._mostrar_lista())
+        e_adb.editingFinished.connect(self._mostrar_lista)
+        for buscador in (c_aec, c_ccc):
+            buscador.cambiado.connect(lambda: self._mostrar_lista() if self.controles else None)
 
     def _opciones(self) -> imf.Opciones:
         c = self.controles
@@ -393,12 +600,27 @@ class VentanaSimple(QMainWindow):
 
     def _menu_tabla(self, punto) -> None:
         indice = self.tabla.indexAt(punto)
-        if not indice.isValid() or indice.column() != C_AEC or indice.row() >= len(self.lista):
+        if not indice.isValid() or indice.row() >= len(self.lista):
             return
-        self.tabla.selectRow(indice.row())
-        f = self.lista[indice.row()]
+        fila, col = indice.row(), indice.column()
+        f = self.lista[fila]
         menu = QMenu(self)
-        menu.addAction("Asignar actividad económica…", lambda: self.asignar_actividad(f))
+        if col == C_AEC:
+            self.tabla.selectRow(fila)
+            menu.addAction("Asignar actividad económica…", lambda: self.asignar_actividad(f))
+        elif col in CAMPO_COLUMNA:
+            campo = CAMPO_COLUMNA[col]
+            filas = self._filas_objetivo(fila)
+            nombre = NOMBRE_CAMPO[campo]
+            menu.addAction(f"Cambiar {nombre}…", lambda: self.tabla.editItem(self.tabla.item(fila, col)))
+            menu.addAction(f"Aplicar este {nombre} a todas las facturas de este cliente",
+                           lambda: self.aplicar_al_cliente(fila, campo))
+            if any(campo in self.lista[r].resu for r in filas):
+                menu.addAction(f"Volver al automático (mes anterior o por defecto)"
+                               + (f" en {len(filas)} facturas" if len(filas) > 1 else ""),
+                               lambda: self.volver_automatico(filas, campo))
+        else:
+            return
         menu.exec(self.tabla.viewport().mapToGlobal(punto))
 
     def asignar_actividad(self, f: facturas.Factura) -> None:
@@ -449,7 +671,7 @@ class VentanaSimple(QMainWindow):
             return
         if columna == C_RUC:
             self.copiar_ruc(self.lista[fila].id_cliente)
-        elif columna == C_AEC:
+        elif columna == C_AEC or columna in CAMPO_COLUMNA:
             self.tabla.editItem(self.tabla.item(fila, columna))
 
     def quitar(self) -> None:
@@ -481,7 +703,7 @@ class VentanaSimple(QMainWindow):
             e.agencia = agencia
             e.guardar()
         opciones = self._opciones()
-        rep, _props = imf.construir_reporte(e, self.anio, self.mes, self.lista, opciones)
+        rep, _props = imf.construir_reporte(e, self.anio, self.mes, self.lista, opciones, self.anteriores)
         mensajes = [m for m in validar(rep, e.estructura, e.catalogos) if m.es_error]
         if mensajes:
             con_problema: set[str] = set()   # números de factura afectados
@@ -513,7 +735,7 @@ class VentanaSimple(QMainWindow):
                 if not lista:
                     QMessageBox.information(self, "Generar", "No queda ninguna factura para generar.")
                     return
-                rep, _props = imf.construir_reporte(e, self.anio, self.mes, lista, opciones)
+                rep, _props = imf.construir_reporte(e, self.anio, self.mes, lista, opciones, self.anteriores)
             elif caja.clickedButton() is not b_todas:
                 return
         cfg = QSettings()
