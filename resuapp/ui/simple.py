@@ -43,6 +43,56 @@ MARCA = ("Arrastre aquí los XML o PDF de sus facturas de venta del mes\n"
          "(también carpetas, ZIP o el TXT de comprobantes emitidos del SRI)")
 
 
+AYUDA = """
+<h2>Cómo usar el Generador RESU UAFE</h2>
+<p>Arma los archivos <b>CLI, OPR y TRA</b> del reporte RESU a partir de las facturas de venta del mes,
+para cargarlos en el UAFI de la empresa.</p>
+
+<h3>1. Elija la empresa y el mes</h3>
+<p>Arriba, en <b>Empresa</b>, escoja con cuál va a trabajar, y el <b>mes y año</b> del reporte.
+Si la empresa no está en la lista, agréguela con <b>«Empresas…»</b> (necesita su archivo uafi.zip).<br>
+Si ese mes ya tenía facturas agregadas, aparecen para seguir donde se quedó.</p>
+
+<h3>2. Agregue las facturas de venta</h3>
+<p><b>Arrastre</b> a la tabla los XML o PDF de las facturas (también una carpeta, un ZIP o el TXT de
+comprobantes emitidos del SRI), o use <b>«Agregar facturas…»</b>.<br>
+Solo se toman <b>facturas de venta de la empresa, del mes elegido y con cliente identificado</b>
+(no consumidor final). Las demás se avisan y no se agregan.</p>
+
+<h3>3. Revise los datos de cada factura</h3>
+<p>Cada fila tiene: actividad económica, tipo de transacción, pago, tipo de bien, área del bien y cantón.</p>
+<ul>
+<li><b>Flechita ▾</b>: elegir de la lista. &nbsp; <b>Doble clic</b>: escribir para buscar
+(por nombre o código, sin importar tildes).</li>
+<li>Con <b>varias filas seleccionadas</b>, el cambio se aplica a todas.</li>
+<li><b>Clic derecho</b> en una celda: aplicar ese valor a todas las facturas del cliente, o volver al automático.</li>
+</ul>
+<p><b>Colores:</b>
+<span style="color:#888"><i>gris</i></span> = valor automático (lo último usado) ·
+<span style="color:#1f4e9c">azul</span> = como en un mes anterior de ese cliente ·
+negro = elegido para esa factura o según su forma de pago ·
+<span style="background:#f8d7da">rojo</span> = ese tipo de transacción no admite ese pago (corríjalo).</p>
+<p>La <b>actividad económica</b> es del cliente: una sola por cliente, vale para todas sus facturas.
+Para verla, elija una factura y pulse <b>«Consultar RUC en el SRI»</b> (copia el RUC; péguelo con Ctrl+V).</p>
+
+<h3>4. Genere los Excel y cárguelos en el UAFI</h3>
+<ol>
+<li>Pulse <b style="color:#2e7d32">Generar Excel (CLI, OPR, TRA)</b> y elija la carpeta. Si algún dato
+podría no ser aceptado por la UAFE, se avisa antes.</li>
+<li>Pulse <b style="color:#c62828">Abrir UAFI de la empresa</b>: escriba el usuario, elija el mes,
+cargue CLI, OPR y TRA, pulse <b>Validar</b> y luego <b>Guardar</b>.</li>
+</ol>
+
+<h3>Datos de la empresa</h3>
+<p>Abajo se ven nombre, RUC, código de registro, usuario SISLAFT y código de agencia.
+<b>Doble clic</b> en un dato lo copia para pegarlo en el SISLAFT o el UAFI. Se corrigen en «Empresas…».</p>
+
+<h3>Qué se guarda solo</h3>
+<p>Las facturas de cada mes, lo que elija en cada una y la actividad económica de cada cliente:
+se recuerdan para los meses siguientes.</p>
+"""
+
+
 class DelegadoLista(QStyledItemDelegate):
     """Celda con flechita ▾: clic en la flecha = lista para elegir; doble clic = escribir y buscar.
 
@@ -254,6 +304,11 @@ class VentanaSimple(QMainWindow):
         arriba.addWidget(QLabel("Mes:"))
         arriba.addWidget(self.c_mes)
         arriba.addWidget(self.s_anio)
+        arriba.addSpacing(20)
+        b_ayuda = QPushButton("?  Ayuda")
+        b_ayuda.setToolTip("Cómo usar el programa")
+        b_ayuda.clicked.connect(self.mostrar_ayuda)
+        arriba.addWidget(b_ayuda)
 
         # --- facturas ---
         self.tabla = TablaFacturas()
@@ -267,6 +322,8 @@ class VentanaSimple(QMainWindow):
         b_sri.setToolTip("Copia el RUC de la factura elegida y abre la consulta de RUC del SRI "
                          "(pegue con Ctrl+V) para ver su actividad económica.")
         b_sri.clicked.connect(lambda: self.consultar_ruc())
+        b_sri.setStyleSheet("QPushButton { background: #1565c0; color: white; font-weight: bold; padding: 4px 12px; "
+                            "border-radius: 4px; }")
         self.delegados = {col: DelegadoLista(self, campo) for col, campo in
                           ((C_AEC, "aec"), (C_TTR, "ttr"), (C_INST, "inst"), (C_TTB, "ttb"), (C_CCO, "cco"))}
         for col, delegado in self.delegados.items():
@@ -286,12 +343,6 @@ class VentanaSimple(QMainWindow):
         botones_lista.addWidget(b_sri)
         botones_lista.addStretch(1)
         botones_lista.addWidget(self.resumen)
-        ayuda = QLabel("En la tabla: flechita ▾ para elegir de la lista, doble clic para escribir; con varias filas "
-                       "seleccionadas el cambio va a todas. <i>En gris</i>: valor automático; "
-                       "<span style='color:#1f4e9c'>en azul</span>: como en un mes anterior del cliente.")
-        ayuda.setWordWrap(True)
-        ayuda.setStyleSheet("color: #555;")
-        self._ayuda_tabla = ayuda
 
         # --- valores por defecto ---
         self.caja = QGroupBox("Empresa")
@@ -331,8 +382,8 @@ class VentanaSimple(QMainWindow):
         lay = QVBoxLayout(central)
         lay.addLayout(arriba)
         lay.addWidget(self.tabla, 1)
+        lay.addSpacing(10)   # separación entre la barra de desplazamiento y los botones
         lay.addLayout(botones_lista)
-        lay.addWidget(self._ayuda_tabla)
         lay.addWidget(self.caja)
         lay.addLayout(abajo)
         self.setCentralWidget(central)
@@ -344,17 +395,18 @@ class VentanaSimple(QMainWindow):
         self.restoreGeometry(cfg.value("simple/geometria", b""))
         if not cfg.value("simple/geometria"):
             self.resize(1180, 720)
-        self._llenar_empresas(cfg.value("simple/empresa", ""))
+        self._llenar_empresas()   # al abrir: sin empresa elegida y la tabla vacía
 
     # ------------------------------------------------------------------
     # Empresa, mes y lista guardada
     def _llenar_empresas(self, seleccionar: str = "") -> None:
         self.c_empresa.blockSignals(True)
         self.c_empresa.clear()
+        self.c_empresa.addItem("— Elija la empresa —", None)
         for e in emp.listar():
             if e.tiene_uafi:
                 self.c_empresa.addItem(f"{e.nombre}   (código {e.codigo})", e.id)
-        self.c_empresa.setCurrentIndex(max(self.c_empresa.findData(seleccionar), 0) if self.c_empresa.count() else -1)
+        self.c_empresa.setCurrentIndex(max(self.c_empresa.findData(seleccionar), 0) if seleccionar else 0)
         self.c_empresa.blockSignals(False)
         self._empresa_elegida()
 
@@ -823,6 +875,23 @@ class VentanaSimple(QMainWindow):
         except Exception as ex:  # noqa: BLE001
             QMessageBox.warning(self, "UAFI", str(ex))
 
+    def mostrar_ayuda(self) -> None:
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser
+
+        d = QDialog(self)
+        d.setWindowTitle("Ayuda — Generador RESU UAFE")
+        d.resize(720, 640)
+        texto = QTextBrowser()
+        texto.setOpenExternalLinks(False)
+        texto.setHtml(AYUDA)
+        botones = QDialogButtonBox(QDialogButtonBox.Close)
+        botones.button(QDialogButtonBox.Close).setText("Cerrar")
+        botones.rejected.connect(d.reject)
+        lay = QVBoxLayout(d)
+        lay.addWidget(texto)
+        lay.addWidget(botones)
+        d.exec()
+
     def administrar_empresas(self) -> None:
         DialogoEmpresas(self).exec()
         self._llenar_empresas(self.c_empresa.currentData() or "")
@@ -840,5 +909,4 @@ class VentanaSimple(QMainWindow):
     def closeEvent(self, event):
         cfg = QSettings()
         cfg.setValue("simple/geometria", self.saveGeometry())
-        cfg.setValue("simple/empresa", self.c_empresa.currentData() or "")
         super().closeEvent(event)

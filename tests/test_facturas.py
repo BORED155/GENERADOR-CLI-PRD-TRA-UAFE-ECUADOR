@@ -145,11 +145,13 @@ def test_ventana_simple(datos, uafi_zip, tmp_path, monkeypatch):
     empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
     (tmp_path / "f.xml").write_bytes(xml_factura())
     v = VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
     v.agregar([str(tmp_path / "f.xml")])
     assert (v.mes, v.anio, len(v.lista)) == (2, 2026, 1)       # cambió solo al mes de la factura
     v.agregar([str(tmp_path / "f.xml")])
     assert len(v.lista) == 1                                    # no se repite
     v2 = VentanaSimple()
+    v2.c_empresa.setCurrentIndex(1)
     v2.c_mes.setCurrentIndex(1)
     v2.s_anio.setValue(2026)
     assert len(v2.lista) == 1                                   # la lista del mes queda guardada
@@ -224,6 +226,7 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
 
     empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
     v = VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
     v.c_mes.setCurrentIndex(1)
     v.s_anio.setValue(2026)
     v.lista = [_factura("000000001"), _factura("000000002"), _factura("000000003", cliente="1799999923001")]
@@ -251,6 +254,7 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     assert "ttb" not in v.lista[0].resu
     # al reabrir el mes, las elecciones siguen ahí
     v2 = VentanaSimple()
+    v2.c_empresa.setCurrentIndex(1)
     v2.c_mes.setCurrentIndex(1)
     v2.s_anio.setValue(2026)
     assert [f.resu.get("adb") for f in v2.lista] == [None, "150", "150"]
@@ -289,6 +293,7 @@ def test_flechita_lista_y_doble_clic_escribir(datos, uafi_zip, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
     empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
     v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
     v.resize(1400, 600)
     v.show()
     v.c_mes.setCurrentIndex(1)
@@ -334,6 +339,7 @@ def test_datos_de_la_empresa_se_copian(datos, uafi_zip):
     e.agencia = CODIGO + "1000"
     e.guardar()
     v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
     d = v.datos_empresa
     assert (d["nombre"].text(), d["ruc"].text(), d["codigo"].text(), d["usuario"].text(), d["agencia"].text()) == \
         ("Constructora Prueba", RUC_EMPRESA, CODIGO, "PRUE1234", CODIGO + "1000")
@@ -343,3 +349,31 @@ def test_datos_de_la_empresa_se_copian(datos, uafi_zip):
     assert QGuiApplication.clipboard().text() == RUC_EMPRESA
     assert not hasattr(v, "controles")          # ya no hay cuadro de valores por defecto
     v.close()
+
+
+def test_abre_limpia_y_ayuda(datos, uafi_zip):
+    from PySide6.QtWidgets import QApplication
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    v.lista = [_factura("000000001")]
+    v._guardar_lista()
+    v.close()
+    # al volver a abrir: sin empresa, tabla vacía y botones desactivados
+    v2 = simple.VentanaSimple()
+    assert v2.c_empresa.currentIndex() == 0 and v2.empresa is None
+    assert v2.tabla.rowCount() == 0 and not v2.b_generar.isEnabled()
+    assert v2.datos_empresa["ruc"].text() == "—"
+    # al elegir la empresa y el mes, aparece lo que ya se había trabajado en ese mes
+    v2.c_empresa.setCurrentIndex(1)
+    v2.c_mes.setCurrentIndex(1)
+    v2.s_anio.setValue(2026)
+    assert v2.tabla.rowCount() == 1
+    assert "Flechita" in simple.AYUDA and "Generar Excel" in simple.AYUDA
+    v2.close()
