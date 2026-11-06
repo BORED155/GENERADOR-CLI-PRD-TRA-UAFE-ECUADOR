@@ -319,3 +319,27 @@ def test_flechita_lista_y_doble_clic_escribir(datos, uafi_zip, monkeypatch):
     assert any("PORTOVIEJO (MANABÍ)" in x for x in buscador.coincidencias("portoviejo manabi")) or \
         not v.empresa.catalogos.tabla("C").get("1301")   # el catálogo de prueba puede no traerlo
     v.close()
+
+
+def test_datos_de_la_empresa_se_copian(datos, uafi_zip):
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    e.usuario = "PRUE1234"
+    e.agencia = CODIGO + "1000"
+    e.guardar()
+    v = simple.VentanaSimple()
+    d = v.datos_empresa
+    assert (d["nombre"].text(), d["ruc"].text(), d["codigo"].text(), d["usuario"].text(), d["agencia"].text()) == \
+        ("Constructora Prueba", RUC_EMPRESA, CODIGO, "PRUE1234", CODIGO + "1000")
+    QTest.mouseDClick(d["usuario"], simple.Qt.LeftButton)
+    assert QGuiApplication.clipboard().text() == "PRUE1234"
+    QTest.mouseDClick(d["ruc"], simple.Qt.LeftButton)
+    assert QGuiApplication.clipboard().text() == RUC_EMPRESA
+    assert not hasattr(v, "controles")          # ya no hay cuadro de valores por defecto
+    v.close()

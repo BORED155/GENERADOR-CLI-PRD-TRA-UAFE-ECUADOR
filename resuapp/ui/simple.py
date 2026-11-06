@@ -18,7 +18,7 @@ from .. import excel, facturas, importar_facturas as imf, uafi
 from ..modelo import Reporte, entero, periodo
 from ..reglas import validar
 from ..rutas import carpeta_documentos
-from .campos import PROVINCIAS, ComboCanton, ControlBuscador
+from .campos import PROVINCIAS, ControlBuscador
 from .empresas import DialogoEmpresas
 
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
@@ -174,6 +174,33 @@ class DelegadoArea(QStyledItemDelegate):
         self.ventana.cambiar_campo(index.row(), "adb", valor)
 
 
+class CampoCopiable(QLabel):
+    """Dato de la empresa: doble clic lo copia al portapapeles."""
+
+    def __init__(self, ventana: "VentanaSimple"):
+        super().__init__()
+        self.ventana = ventana
+        self.valor = ""
+        self.setStyleSheet("QLabel { background: white; border: 1px solid #c8c8c8; border-radius: 3px; "
+                           "padding: 5px 8px; font-weight: bold; } QLabel:hover { border-color: #2e7d32; }")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+
+    def poner(self, valor: str) -> None:
+        self.valor = (valor or "").strip()
+        self.setText(self.valor or "—")
+        self.setToolTip(f"{self.valor}\nDoble clic para copiar" if self.valor else "Sin dato (complételo en «Empresas…»)")
+
+    def mouseDoubleClickEvent(self, event):
+        if self.valor:
+            QGuiApplication.clipboard().setText(self.valor)
+            self.ventana.statusBar().showMessage(f"Copiado al portapapeles: {self.valor}", 5000)
+            self.setStyleSheet(self.styleSheet().replace("background: white", "background: #d4edda"))
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(600, lambda: self.setStyleSheet(
+                self.styleSheet().replace("background: #d4edda", "background: white")))
+
+
 class TablaFacturas(QTableWidget):
     def __init__(self):
         super().__init__(0, len(COLUMNAS))
@@ -194,13 +221,6 @@ class TablaFacturas(QTableWidget):
             fuente.setPointSizeF(fuente.pointSizeF() * 1.3)
             p.setFont(fuente)
             p.drawText(self.viewport().rect().adjusted(20, 10, -20, -10), Qt.AlignCenter | Qt.TextWordWrap, MARCA)
-
-
-def _combo_dict(opciones: dict[str, str]) -> QComboBox:
-    c = QComboBox()
-    for codigo, nombre in opciones.items():
-        c.addItem(f"{codigo} — {nombre}", codigo)
-    return c
 
 
 class VentanaSimple(QMainWindow):
@@ -265,18 +285,41 @@ class VentanaSimple(QMainWindow):
         botones_lista.addWidget(b_sri)
         botones_lista.addStretch(1)
         botones_lista.addWidget(self.resumen)
+        ayuda = QLabel("En la tabla: flechita ▾ para elegir de la lista, doble clic para escribir; con varias filas "
+                       "seleccionadas el cambio va a todas. <i>En gris</i>: valor automático; "
+                       "<span style='color:#1f4e9c'>en azul</span>: como en un mes anterior del cliente.")
+        ayuda.setWordWrap(True)
+        ayuda.setStyleSheet("color: #555;")
+        self._ayuda_tabla = ayuda
 
         # --- valores por defecto ---
-        self.caja = QGroupBox("Valores por defecto")
+        self.caja = QGroupBox("Empresa")
         self.rejilla = QGridLayout(self.caja)
-        self.controles: dict[str, QWidget] = {}
+        self.datos_empresa: dict[str, CampoCopiable] = {}
+        for col, (clave, titulo) in enumerate((("nombre", "Nombre"), ("ruc", "RUC"),
+                                               ("codigo", "Código de registro"), ("usuario", "Usuario SISLAFT"),
+                                               ("agencia", "Código de agencia"))):
+            etiqueta = QLabel(titulo)
+            etiqueta.setStyleSheet("color: #555;")
+            campo = CampoCopiable(self)
+            self.datos_empresa[clave] = campo
+            self.rejilla.addWidget(etiqueta, 0, col)
+            self.rejilla.addWidget(campo, 1, col)
+        self.rejilla.setColumnStretch(0, 4)
+        for col in range(1, 5):
+            self.rejilla.setColumnStretch(col, 1)
+        self.opciones_base = imf.Opciones()
 
         # --- acciones ---
         self.b_generar = QPushButton("Generar Excel  (CLI, OPR, TRA)")
-        self.b_generar.setStyleSheet("font-weight: bold; padding: 8px 18px;")
+        self.b_generar.setStyleSheet(
+            "QPushButton { background: #2e7d32; color: white; font-weight: bold; padding: 8px 18px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #a5c9a7; }")
         self.b_generar.clicked.connect(self.generar)
         self.b_uafi = QPushButton("Abrir UAFI de la empresa")
-        self.b_uafi.setStyleSheet("padding: 8px 18px;")
+        self.b_uafi.setStyleSheet(
+            "QPushButton { background: #c62828; color: white; font-weight: bold; padding: 8px 18px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #e3a5a5; }")
         self.b_uafi.clicked.connect(self.abrir_uafi)
         abajo = QHBoxLayout()
         abajo.addStretch(1)
@@ -288,6 +331,7 @@ class VentanaSimple(QMainWindow):
         lay.addLayout(arriba)
         lay.addWidget(self.tabla, 1)
         lay.addLayout(botones_lista)
+        lay.addWidget(self._ayuda_tabla)
         lay.addWidget(self.caja)
         lay.addLayout(abajo)
         self.setCentralWidget(central)
@@ -393,7 +437,7 @@ class VentanaSimple(QMainWindow):
         self.lista.sort(key=lambda f: (f.fecha or dt.date.min, f.numero))
         directorio = self.empresa.directorio_clientes() if self.empresa else {}
         cat = self.empresa.catalogos if self.empresa else None
-        opciones = self._opciones() if self.controles else imf.Opciones()
+        opciones = self._opciones()
         cursiva = self.tabla.font()
         cursiva.setItalic(True)
         self.tabla.setRowCount(len(self.lista))
@@ -495,80 +539,31 @@ class VentanaSimple(QMainWindow):
                                      f"{f.nombre_cliente}.", 6000)
 
     # ------------------------------------------------------------------
-    # Valores por defecto
+    # Datos de la empresa y valores automáticos
     def _construir_opciones(self) -> None:
-        while self.rejilla.count():
-            w = self.rejilla.takeAt(0).widget()
-            if w is not None:
-                w.hide()            # que no quede dibujado encima mientras se borra
-                w.setParent(None)
-                w.deleteLater()
-        self.controles = {}
-        self.caja.setEnabled(self.empresa is not None)
-        if self.empresa is None:
+        """Lee los reportes anteriores de la empresa y muestra sus datos.
+
+        Las facturas sin valor elegido ni mes anterior del mismo cliente usan lo último que se eligió o lo
+        más frecuente en los reportes anteriores (opciones_sugeridas); en la tabla salen en gris."""
+        e = self.empresa
+        for clave, campo in self.datos_empresa.items():
+            campo.poner(getattr(e, clave, "") if e is not None else "")
+        if e is not None and not e.agencia:
+            self.datos_empresa["agencia"].poner(e.agencia_defecto())
+        self.caja.setEnabled(e is not None)
+        self.previos = []
+        self.opciones_base = imf.Opciones()
+        if e is None:
             return
-        e, cat = self.empresa, self.empresa.catalogos
-        previos = []
         for ruta in sorted(e.carpeta_reportes.glob("RESU*.json")):
             try:
-                previos.append(Reporte.abrir(ruta))
+                self.previos.append(Reporte.abrir(ruta))
             except (OSError, ValueError, KeyError):
                 pass
-        self.previos = previos
-        op = imf.opciones_sugeridas(e, previos)
-        cliente = e.estructura.niveles[0]
-        tipos_tx = dict(sorted(cat.tabla("TT").items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
-        c_ttr = _combo_dict(tipos_tx)
-        c_ttb = _combo_dict(dict(sorted(cat.tabla("TB").items())))
-        e_adb = QLineEdit(op.adb)
-        e_adb.setMaximumWidth(90)
-        c_inst = _combo_dict(imf.NOMBRE_INSTRUMENTO)
-        c_inst.setToolTip("Cómo registrar la forma de pago «20 - otros con utilización del sistema financiero» "
-                          "(transferencias, cheques…), que la factura no detalla.")
-        c_aec = ControlBuscador(cliente.campo("AEC"), cat.tabla("AE"),
-                                "Escriba la actividad (ej.: construcción de edificios) o su código…")
-        c_aec.setToolTip("Para clientes nuevos. Los clientes que ya estaban en reportes anteriores conservan la suya.")
-        c_ccc = ComboCanton(cat.tabla("C"))
-        c_ccc.setToolTip("Si la dirección de la factura no menciona un cantón conocido.")
-        e_cat = QLineEdit(e.agencia_defecto())
-        e_cat.setMaxLength(9)
-        e_cat.setMaximumWidth(120)
-        for combo, valor in ((c_ttr, op.ttr), (c_ttb, op.ttb), (c_inst, op.instrumento_20)):
-            combo.setCurrentIndex(max(combo.findData(valor), 0))
-        c_aec.poner_valor(op.aec)
-        c_ccc.poner_valor(op.ccc)
-        self.controles = {"ttr": c_ttr, "ttb": c_ttb, "adb": e_adb, "instrumento_20": c_inst, "aec": c_aec,
-                          "ccc": c_ccc, "agencia": e_cat}
-        nota = QLabel("Se usan en las facturas que no tienen un valor elegido ni datos de un mes anterior del mismo "
-                      "cliente (en la tabla salen <i>en gris</i>; los de un mes anterior, <span style='color:#1f4e9c'>"
-                      "en azul</span>). En la tabla: flechita ▾ para elegir de la lista o doble clic para "
-                      "escribir; con varias filas seleccionadas, el cambio va a todas.")
-        nota.setWordWrap(True)
-        self.rejilla.addWidget(nota, 0, 0, 1, 4)
-        filas = [("Tipo de transacción:", c_ttr, "Tipo de bien:", c_ttb),
-                 ("Pago «20 - otros con sistema financiero» como:", c_inst, "Área del bien (m²):", e_adb),
-                 ("Actividad económica (clientes nuevos):", c_aec, "Código de agencia:", e_cat),
-                 ("Cantón (si la dirección no lo dice):", c_ccc, "", None)]
-        for r, (t1, w1, t2, w2) in enumerate(filas, start=1):
-            self.rejilla.addWidget(QLabel(t1), r, 0, Qt.AlignRight)
-            self.rejilla.addWidget(w1, r, 1)
-            if w2 is not None:
-                self.rejilla.addWidget(QLabel(t2), r, 2, Qt.AlignRight)
-                self.rejilla.addWidget(w2, r, 3)
-        self.rejilla.setColumnStretch(1, 3)
-        self.rejilla.setColumnStretch(3, 1)
-        # al cambiar un valor por defecto, la tabla muestra el nuevo en las facturas que lo usan
-        for combo in (c_ttr, c_ttb, c_inst):
-            combo.currentIndexChanged.connect(lambda _i: self._mostrar_lista())
-        e_adb.editingFinished.connect(self._mostrar_lista)
-        c_aec.cambiado.connect(lambda: self._mostrar_lista() if self.controles else None)
-        c_ccc.currentIndexChanged.connect(lambda _i: self._mostrar_lista() if self.controles else None)
+        self.opciones_base = imf.opciones_sugeridas(e, self.previos)
 
     def _opciones(self) -> imf.Opciones:
-        c = self.controles
-        return imf.Opciones(ttr=c["ttr"].currentData(), ttb=c["ttb"].currentData(),
-                            adb=entero(c["adb"].text()) or "0", instrumento_20=c["instrumento_20"].currentData(),
-                            aec=c["aec"].valor(), ccc=c["ccc"].valor() or "1701")
+        return imf.Opciones(**self.opciones_base.a_dict())
 
     # ------------------------------------------------------------------
     # Facturas
@@ -735,14 +730,12 @@ class VentanaSimple(QMainWindow):
         e = self.empresa
         if e is None or not self.lista:
             return
-        agencia = self.controles["agencia"].text().strip()
+        agencia = e.agencia_defecto().strip()
         if not (agencia.isdigit() and len(agencia) in (8, 9) and agencia.startswith(e.codigo)):
-            QMessageBox.warning(self, "Código de agencia", f"El código de agencia debe tener 8 o 9 dígitos y empezar "
-                                                          f"con el código de la empresa ({e.codigo}).")
+            QMessageBox.warning(self, "Código de agencia", f"El código de agencia ({agencia or 'vacío'}) debe tener 8 o 9 "
+                                                          f"dígitos y empezar con el código de la empresa ({e.codigo}).\n"
+                                                          "Corríjalo en «Empresas…».")
             return
-        if agencia != e.agencia:
-            e.agencia = agencia
-            e.guardar()
         opciones = self._opciones()
         rep, _props = imf.construir_reporte(e, self.anio, self.mes, self.lista, opciones, self.anteriores)
         mensajes = [m for m in validar(rep, e.estructura, e.catalogos) if m.es_error]
