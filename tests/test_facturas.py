@@ -502,6 +502,7 @@ def test_editar_total_y_forma_de_pago(datos, uafi_zip, tmp_path, monkeypatch):
     v.cambiar_total(0, "1234.56")
     assert v.lista[0].total == Decimal("1234.56") and v.tabla.item(0, simple.C_TOTAL).font().bold()
     assert "1,000.00" in v.tabla.item(0, simple.C_TOTAL).toolTip()          # lo que decía la factura
+    assert "va como 1234" in v.tabla.item(0, simple.C_TOTAL).toolTip()      # sin decimales en el RESU
     v.cambiar_total(1, "0")                                                  # no se acepta
     assert v.lista[1].total == Decimal("500")
     # forma de pago en las dos (seleccionadas): tarjeta de crédito -> pago VTC

@@ -564,7 +564,9 @@ class VentanaSimple(QMainWindow):
                         texto_ayuda = f"Cambiado a mano (la factura dice {Decimal(original):,.2f})"
                     else:
                         texto_ayuda = "Total de la factura"
-                    item.setToolTip(f"{texto}\n{texto_ayuda}\nDoble clic para cambiarlo")
+                    en_reporte = f"En el reporte va como {int(f.total)} (la UAFE pide valores sin decimales; " \
+                                 "se quitan los centavos)"
+                    item.setToolTip(f"{texto}\n{texto_ayuda}\n{en_reporte}\nDoble clic para cambiarlo")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     self.tabla.setItem(fila, col, item)
                     continue
