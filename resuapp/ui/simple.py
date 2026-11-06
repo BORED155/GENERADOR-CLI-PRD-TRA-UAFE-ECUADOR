@@ -108,6 +108,16 @@ cargue CLI, OPR y TRA, pulse <b>Validar</b> y luego <b>Guardar</b>.</li>
 """
 
 
+def _entero_miles(valor: Decimal) -> str:
+    """1234.56 -> «1.234» (sin centavos, como va al reporte)."""
+    return f"{int(valor):,}".replace(",", ".")
+
+
+def _dinero(valor: Decimal) -> str:
+    """1234.56 -> «1.234,56»."""
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _html(texto: str) -> str:
     import html
 
@@ -242,7 +252,7 @@ class DelegadoTotal(QStyledItemDelegate):
         return e
 
     def setEditorData(self, editor, index):
-        editor.setText(str(index.data(Qt.UserRole) or ""))
+        editor.setText(str(int(Decimal(index.data(Qt.UserRole) or "0"))))
         editor.selectAll()
 
     def setModelData(self, editor, model, index):
@@ -550,7 +560,7 @@ class VentanaSimple(QMainWindow):
             actividad = f"{aec} — {cat.nombre('AE', aec)}" if aec else "(la de por defecto)"
             v = imf.valores_factura(f, opciones, self.anteriores, self._canton_cliente(f, directorio))
             valores = [f.nombre_cliente, f.id_cliente, actividad, "", "", "", "", "", f.numero,
-                       f.fecha.strftime("%d/%m/%Y") if f.fecha else "", f"{f.total:,.2f}", formas, f.archivo]
+                       f.fecha.strftime("%d/%m/%Y") if f.fecha else "", _entero_miles(f.total), formas, f.archivo]
             negrita = self.tabla.font()
             negrita.setBold(True)
             for col, texto in enumerate(valores):
@@ -561,11 +571,10 @@ class VentanaSimple(QMainWindow):
                     original = f.resu.get("total_factura")
                     if original is not None and Decimal(original) != f.total:
                         item.setFont(negrita)
-                        texto_ayuda = f"Cambiado a mano (la factura dice {Decimal(original):,.2f})"
+                        texto_ayuda = f"Cambiado a mano (la factura dice {_dinero(Decimal(original))})"
                     else:
-                        texto_ayuda = "Total de la factura"
-                    en_reporte = f"En el reporte va como {int(f.total)} (la UAFE pide valores sin decimales; " \
-                                 "se quitan los centavos)"
+                        texto_ayuda = f"La factura dice {_dinero(f.total)}"
+                    en_reporte = "Sin centavos: la UAFE pide valores sin decimales"
                     item.setToolTip(f"{texto}\n{texto_ayuda}\n{en_reporte}\nDoble clic para cambiarlo")
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                     self.tabla.setItem(fila, col, item)
@@ -660,8 +669,8 @@ class VentanaSimple(QMainWindow):
         from decimal import InvalidOperation
 
         try:
-            valor = Decimal(texto).quantize(Decimal("0.01"))
-        except InvalidOperation:
+            valor = Decimal(int(Decimal(texto)))   # sin centavos, como va al reporte
+        except (InvalidOperation, ValueError):
             return
         if fila >= len(self.lista) or valor <= 0:
             self.statusBar().showMessage("El total debe ser mayor que cero.", 6000)
@@ -674,7 +683,7 @@ class VentanaSimple(QMainWindow):
             f.pagos = [(f.pagos[0][0], valor)]
         f.total = valor
         self._mostrar_lista()
-        self.statusBar().showMessage(f"Total de la factura {f.numero} cambiado a {valor:,.2f}.", 6000)
+        self.statusBar().showMessage(f"Total de la factura {f.numero} cambiado a {_entero_miles(valor)}.", 6000)
 
     def cambiar_forma_pago(self, fila: int, codigo: str) -> None:
         """Forma de pago del SRI elegida a mano: el pago de la UAFE se vuelve a deducir de ella."""

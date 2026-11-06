@@ -499,10 +499,10 @@ def test_editar_total_y_forma_de_pago(datos, uafi_zip, tmp_path, monkeypatch):
     v.lista = [_factura("000000001", total="1000"), _factura("000000002", total="500")]
     v._mostrar_lista()
     # total
-    v.cambiar_total(0, "1234.56")
-    assert v.lista[0].total == Decimal("1234.56") and v.tabla.item(0, simple.C_TOTAL).font().bold()
-    assert "1,000.00" in v.tabla.item(0, simple.C_TOTAL).toolTip()          # lo que decía la factura
-    assert "va como 1234" in v.tabla.item(0, simple.C_TOTAL).toolTip()      # sin decimales en el RESU
+    v.cambiar_total(0, "1234.56")                                            # con centavos: quedan fuera
+    assert v.lista[0].total == Decimal("1234") and v.tabla.item(0, simple.C_TOTAL).font().bold()
+    assert v.tabla.item(0, simple.C_TOTAL).text() == "1.234"
+    assert "1.000,00" in v.tabla.item(0, simple.C_TOTAL).toolTip()          # lo que decía la factura
     v.cambiar_total(1, "0")                                                  # no se acepta
     assert v.lista[1].total == Decimal("500")
     # forma de pago en las dos (seleccionadas): tarjeta de crédito -> pago VTC
@@ -536,4 +536,22 @@ def test_editar_total_y_pago_en_plantillas(datos, uafi_zip, tmp_path, monkeypatc
     o = next(o for c in rep.clientes for o in c.hijos if o.get("NCT").endswith("1"))
     t = o.hijos[0]
     assert (o.get("VTO"), t.get("VVT"), t.get("VEF"), t.get("VDE")) == ("1500", "1500", "1500", "0")
+    v.close()
+
+
+
+def test_total_se_ve_sin_centavos(datos, uafi_zip):
+    from PySide6.QtWidgets import QApplication
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
+    v.lista = [_factura("000000001", total="12500.75")]
+    v._mostrar_lista()
+    celda = v.tabla.item(0, simple.C_TOTAL)
+    assert celda.text() == "12.500" and not celda.font().bold()
+    assert "12.500,75" in celda.toolTip()                                    # el valor de la factura, con centavos
     v.close()
