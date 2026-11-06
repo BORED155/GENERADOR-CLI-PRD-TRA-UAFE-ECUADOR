@@ -192,6 +192,7 @@ class CampoCopiable(QLabel):
         self.setToolTip(f"{self.valor}\nDoble clic para copiar" if self.valor else "Sin dato (complételo en «Empresas…»)")
 
     def mouseDoubleClickEvent(self, event):
+        event.accept()   # el doble clic es solo para copiar: no pasa a la ventana
         if self.valor:
             QGuiApplication.clipboard().setText(self.valor)
             self.ventana.statusBar().showMessage(f"Copiado al portapapeles: {self.valor}", 5000)
