@@ -18,7 +18,7 @@ from .. import excel, facturas, importar_facturas as imf, uafi
 from ..modelo import Reporte, entero, periodo
 from ..reglas import validar
 from ..rutas import carpeta_documentos
-from .campos import ComboCanton, ControlBuscador
+from .campos import PROVINCIAS, ComboCanton, ControlBuscador
 from .empresas import DialogoEmpresas
 
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
@@ -43,54 +43,113 @@ MARCA = ("Arrastre aquí los XML o PDF de sus facturas de venta del mes\n"
          "(también carpetas, ZIP o el TXT de comprobantes emitidos del SRI)")
 
 
-class DelegadoActividad(QStyledItemDelegate):
-    """Editor dentro de la celda «Actividad económica»: se escribe y se filtra el catálogo."""
+class DelegadoLista(QStyledItemDelegate):
+    """Celda con flechita ▾: clic en la flecha = lista para elegir; doble clic = escribir y buscar.
 
-    def __init__(self, ventana: "VentanaSimple"):
+    Campos: aec (actividad económica, del cliente) y ttr, inst, ttb, cco (de la factura)."""
+
+    ANCHO_FLECHA = 18
+
+    def __init__(self, ventana: "VentanaSimple", campo: str):
         super().__init__(ventana)
-        self.ventana = ventana
+        self.ventana, self.campo = ventana, campo
+        self.modo = "lista"   # «lista» (flechita) o «escribir» (doble clic)
+
+    # --- dibujo de la flechita ---
+    def _zona_flecha(self, rect):
+        from PySide6.QtCore import QRect
+
+        return QRect(rect.right() - self.ANCHO_FLECHA, rect.top(), self.ANCHO_FLECHA, rect.height())
+
+    def paint(self, painter, option, index):
+        from PySide6.QtWidgets import QApplication, QStyle, QStyleOption
+
+        opt = type(option)(option)
+        opt.rect = option.rect.adjusted(0, 0, -self.ANCHO_FLECHA, 0)   # que el texto no tape la flecha
+        super().paint(painter, opt, index)
+        flecha = QStyleOption()
+        flecha.rect = self._zona_flecha(option.rect).adjusted(4, 0, -4, 0)
+        flecha.palette = option.palette
+        flecha.state = QStyle.State_Enabled
+        QApplication.style().drawPrimitive(QStyle.PE_IndicatorArrowDown, flecha, painter)
+
+    def sizeHint(self, option, index):
+        tam = super().sizeHint(option, index)
+        tam.setWidth(tam.width() + self.ANCHO_FLECHA + 4)   # espacio para la flecha
+        return tam
+
+    def editorEvent(self, event, model, option, index):
+        from PySide6.QtCore import QEvent
+
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton and \
+                self._zona_flecha(option.rect).contains(event.position().toPoint()):
+            self.modo = "lista"
+            self.ventana.tabla.setCurrentIndex(index) if not self.ventana.tabla.selectionModel().isSelected(index) \
+                else None
+            self.ventana.tabla.edit(index)
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    # --- opciones ---
+    def _tabla(self) -> dict[str, str]:
+        if self.campo == "aec":
+            return self.ventana.empresa.catalogos.tabla("AE")
+        return self.ventana.opciones_campo(self.campo)
+
+    def _texto(self, codigo: str, nombre: str) -> str:
+        if self.campo == "inst":
+            return nombre
+        if self.campo == "cco":
+            provincia = PROVINCIAS.get(codigo[:2], "")
+            return f"{nombre} ({provincia}) — {codigo}" if provincia else f"{nombre} — {codigo}"
+        return f"{codigo} — {nombre}"
 
     def createEditor(self, parent, option, index):
-        editor = ControlBuscador(None, self.ventana.empresa.catalogos.tabla("AE"),
-                                 "Escriba la actividad o su código y elija de la lista…", parent)
+        modo, self.modo = self.modo, "lista"
+        tabla = self._tabla()
+        if modo == "lista":
+            c = QComboBox(parent)
+            c.setMaxVisibleItems(18)
+            items = [(self._texto(k, v), k) for k, v in tabla.items() if not (self.campo == "cco" and k == "0000")]
+            if self.campo in ("cco", "aec"):
+                items.sort(key=lambda t: t[0] if self.campo == "cco" else t[1])
+            for texto, codigo in items:
+                c.addItem(texto, codigo)
+            c.activated.connect(lambda _i, ed=c: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
+            return c
+        # escribir: busca por partes del nombre o el código, sin tildes (y la provincia en los cantones)
+        buscable = {k: (f"{v} ({PROVINCIAS.get(k[:2], '')})" if self.campo == "cco" else v)
+                    for k, v in tabla.items() if not (self.campo == "cco" and k == "0000")}
+        editor = ControlBuscador(None, buscable, "Escriba para buscar y elija de la lista…", parent)
         editor.setAutoFillBackground(True)
         editor.completer.activated.connect(lambda _t, ed=editor: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
         return editor
 
     def setEditorData(self, editor, index):
         actual = index.data(Qt.UserRole) or ""
-        if actual:
-            editor.edit.setPlaceholderText(f"Actual: {index.data()}  — escriba para buscar otra")
-        editor.codigo = ""
-        editor.edit.clear()
-        editor.edit.setFocus()
+        if isinstance(editor, QComboBox):
+            editor.setCurrentIndex(max(editor.findData(actual), 0))
+            editor.showPopup()
+        else:
+            editor.edit.setPlaceholderText(f"Actual: {index.data()}  — escriba para buscar")
+            editor.codigo = ""
+            editor.edit.clear()
+            editor.edit.setFocus()
+
+    def updateEditorGeometry(self, editor, option, index):
+        r = option.rect
+        r.setWidth(max(r.width(), 360))
+        editor.setGeometry(r)
 
     def setModelData(self, editor, model, index):
-        codigo = editor.valor()
-        if codigo and codigo != (index.data(Qt.UserRole) or "") and index.row() < len(self.ventana.lista):
-            self.ventana.guardar_actividad(self.ventana.lista[index.row()], codigo)
-
-
-class DelegadoOpciones(QStyledItemDelegate):
-    """Lista desplegable dentro de la celda (tipo de transacción, pago, tipo de bien)."""
-
-    def __init__(self, ventana: "VentanaSimple", campo: str):
-        super().__init__(ventana)
-        self.ventana, self.campo = ventana, campo
-
-    def createEditor(self, parent, option, index):
-        c = QComboBox(parent)
-        for codigo, nombre in self.ventana.opciones_campo(self.campo).items():
-            c.addItem(f"{codigo} — {nombre}" if self.campo != "inst" else nombre, codigo)
-        c.activated.connect(lambda _i, ed=c: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
-        return c
-
-    def setEditorData(self, editor, index):
-        editor.setCurrentIndex(max(editor.findData(index.data(Qt.UserRole) or ""), 0))
-        editor.showPopup()
-
-    def setModelData(self, editor, model, index):
-        self.ventana.cambiar_campo(index.row(), self.campo, editor.currentData() or "")
+        codigo = (editor.currentData() if isinstance(editor, QComboBox) else editor.valor()) or ""
+        if not codigo or index.row() >= len(self.ventana.lista):
+            return
+        if self.campo == "aec":
+            if codigo != (index.data(Qt.UserRole) or ""):
+                self.ventana.guardar_actividad(self.ventana.lista[index.row()], codigo)
+        else:
+            self.ventana.cambiar_campo(index.row(), self.campo, codigo)
 
 
 class DelegadoArea(QStyledItemDelegate):
@@ -113,30 +172,6 @@ class DelegadoArea(QStyledItemDelegate):
     def setModelData(self, editor, model, index):
         valor = entero(editor.text()) or "0"
         self.ventana.cambiar_campo(index.row(), "adb", valor)
-
-
-class DelegadoCanton(QStyledItemDelegate):
-    def __init__(self, ventana: "VentanaSimple"):
-        super().__init__(ventana)
-        self.ventana = ventana
-
-    def createEditor(self, parent, option, index):
-        editor = ComboCanton(self.ventana.empresa.catalogos.tabla("C"), parent)
-        editor.activated.connect(lambda _i, ed=editor: (self.commitData.emit(ed), self.closeEditor.emit(ed)))
-        return editor
-
-    def setEditorData(self, editor, index):
-        editor.poner_valor(index.data(Qt.UserRole) or "")
-        editor.showPopup()   # la lista completa de cantones del catálogo
-
-    def updateEditorGeometry(self, editor, option, index):
-        r = option.rect
-        r.setWidth(max(r.width(), 360))
-        editor.setGeometry(r)
-
-    def setModelData(self, editor, model, index):
-        if editor.valor():
-            self.ventana.cambiar_campo(index.row(), "cco", editor.valor())
 
 
 class TablaFacturas(QTableWidget):
@@ -211,11 +246,11 @@ class VentanaSimple(QMainWindow):
         b_sri.setToolTip("Copia el RUC de la factura elegida y abre la consulta de RUC del SRI "
                          "(pegue con Ctrl+V) para ver su actividad económica.")
         b_sri.clicked.connect(lambda: self.consultar_ruc())
-        self.tabla.setItemDelegateForColumn(C_AEC, DelegadoActividad(self))
-        for col, campo in ((C_TTR, "ttr"), (C_INST, "inst"), (C_TTB, "ttb")):
-            self.tabla.setItemDelegateForColumn(col, DelegadoOpciones(self, campo))
+        self.delegados = {col: DelegadoLista(self, campo) for col, campo in
+                          ((C_AEC, "aec"), (C_TTR, "ttr"), (C_INST, "inst"), (C_TTB, "ttb"), (C_CCO, "cco"))}
+        for col, delegado in self.delegados.items():
+            self.tabla.setItemDelegateForColumn(col, delegado)
         self.tabla.setItemDelegateForColumn(C_ADB, DelegadoArea(self))
-        self.tabla.setItemDelegateForColumn(C_CCO, DelegadoCanton(self))
         self.anteriores: dict[str, dict[str, str]] = {}
         self.previos: list[Reporte] = []
         self.tabla.cellDoubleClicked.connect(self._doble_clic)
@@ -371,7 +406,7 @@ class VentanaSimple(QMainWindow):
                        f.fecha.strftime("%d/%m/%Y") if f.fecha else "", f"{f.total:,.2f}", formas, f.archivo]
             for col, texto in enumerate(valores):
                 item = QTableWidgetItem(texto)
-                item.setToolTip({C_AEC: f"{texto}\nDoble clic para escribir y buscar la actividad\n"
+                item.setToolTip({C_AEC: f"{texto}\nFlechita: elegir de la lista · Doble clic: escribir para buscar\n"
                                         "(una por cliente: vale para todas sus facturas)",
                                  C_RUC: f"{texto}\nDoble clic para copiarlo"}.get(col, texto))
                 if col == C_AEC:
@@ -394,8 +429,10 @@ class VentanaSimple(QMainWindow):
                     item.setForeground(QColor(color))
                 if en_cursiva:
                     item.setFont(cursiva)
-                item.setToolTip(f"{item.text()}\n{explicacion}\nDoble clic para cambiarlo "
-                                "(con varias filas seleccionadas, cambia todas)")
+                item.setToolTip(f"{item.text()}\n{explicacion}\n"
+                                + ("Doble clic para escribirla" if campo == "adb" else
+                                   "Flechita: elegir de la lista · Doble clic: escribir para buscar")
+                                + "\n(con varias filas seleccionadas, cambia todas)")
                 if campo == "adb":
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.tabla.setItem(fila, col, item)
@@ -504,7 +541,8 @@ class VentanaSimple(QMainWindow):
                           "ccc": c_ccc, "agencia": e_cat}
         nota = QLabel("Se usan en las facturas que no tienen un valor elegido ni datos de un mes anterior del mismo "
                       "cliente (en la tabla salen <i>en gris</i>; los de un mes anterior, <span style='color:#1f4e9c'>"
-                      "en azul</span>). Doble clic en una celda de la tabla para cambiar solo esa factura.")
+                      "en azul</span>). En la tabla: flechita ▾ para elegir de la lista o doble clic para "
+                      "escribir; con varias filas seleccionadas, el cambio va a todas.")
         nota.setWordWrap(True)
         self.rejilla.addWidget(nota, 0, 0, 1, 4)
         filas = [("Tipo de transacción:", c_ttr, "Tipo de bien:", c_ttb),
@@ -673,6 +711,8 @@ class VentanaSimple(QMainWindow):
         if columna == C_RUC:
             self.copiar_ruc(self.lista[fila].id_cliente)
         elif columna == C_AEC or columna in CAMPO_COLUMNA:
+            if columna in self.delegados:
+                self.delegados[columna].modo = "escribir"   # doble clic: escribir para buscar
             self.tabla.editItem(self.tabla.item(fila, columna))
 
     def quitar(self) -> None:

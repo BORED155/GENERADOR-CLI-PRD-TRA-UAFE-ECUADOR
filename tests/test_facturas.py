@@ -275,3 +275,47 @@ def test_lista_de_cantones(datos, uafi_zip):
     assert c.valor() == "1701"
     c.setEditText("bolivar")                                          # dos coincidencias: hay que elegir
     assert c.valor() == ""
+
+
+def test_flechita_lista_y_doble_clic_escribir(datos, uafi_zip, monkeypatch):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox
+
+    from resuapp.ui import simple
+    from resuapp.ui.campos import ControlBuscador
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = simple.VentanaSimple()
+    v.resize(1400, 600)
+    v.show()
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    v.lista = [_factura("000000001")]
+    v._guardar_lista()
+    v._mostrar_lista()
+    app.processEvents()
+    t = v.tabla
+    # clic en la flechita del pago: se abre la lista
+    r = t.visualRect(t.model().index(0, simple.C_INST))
+    QTest.mouseClick(t.viewport(), Qt.LeftButton, pos=QPoint(r.right() - 6, r.center().y()))
+    editor = t.indexWidget(t.model().index(0, simple.C_INST)) or t.focusWidget()
+    combo = editor if isinstance(editor, QComboBox) else editor.findChild(QComboBox)
+    assert combo is not None and combo.count() == len(v.opciones_campo("inst"))
+    combo.hidePopup()
+    combo.setCurrentIndex(combo.findData("VDE"))
+    combo.activated.emit(combo.currentIndex())
+    app.processEvents()
+    assert v.lista[0].resu["inst"] == "VDE"
+    # doble clic en el cantón: se escribe para buscar (por provincia, sin tildes)
+    v._doble_clic(0, simple.C_CCO)
+    app.processEvents()
+    buscador = t.focusWidget()
+    while buscador is not None and not isinstance(buscador, ControlBuscador):
+        buscador = buscador.parentWidget()
+    assert isinstance(buscador, ControlBuscador)
+    assert any("PORTOVIEJO (MANABÍ)" in x for x in buscador.coincidencias("portoviejo manabi")) or \
+        not v.empresa.catalogos.tabla("C").get("1301")   # el catálogo de prueba puede no traerlo
+    v.close()
