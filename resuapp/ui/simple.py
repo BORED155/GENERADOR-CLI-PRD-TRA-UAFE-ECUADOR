@@ -25,7 +25,7 @@ MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto
          "Noviembre", "Diciembre"]
 COLUMNAS = ["Cliente", "RUC / cédula", "Actividad económica", "Tipo de transacción", "Pago", "Tipo de bien",
             "Área del bien (m²)", "Cantón", "Factura", "Fecha", "Total", "Forma de pago (SRI)", "Archivo"]
-C_RUC, C_AEC, C_TTR, C_INST, C_TTB, C_ADB, C_CCO, C_TOTAL, C_FP = 1, 2, 3, 4, 5, 6, 7, 10, 11
+C_RUC, C_AEC, C_TTR, C_INST, C_TTB, C_ADB, C_CCO, C_FACT, C_TOTAL, C_FP = 1, 2, 3, 4, 5, 6, 7, 8, 10, 11
 # columna -> campo de la factura (importar_facturas.CAMPOS_FACTURA)
 CAMPO_COLUMNA = {C_TTR: "ttr", C_INST: "inst", C_TTB: "ttb", C_ADB: "adb", C_CCO: "cco"}
 NOMBRE_CAMPO = {"ttr": "tipo de transacción", "inst": "pago", "ttb": "tipo de bien", "adb": "área del bien",
@@ -80,7 +80,13 @@ negro = elegido para esa factura o según su forma de pago ·
 <p>La <b>actividad económica</b> es del cliente: una sola por cliente, vale para todas sus facturas.
 Para verla, elija una factura y pulse <b>«Consultar RUC en el SRI»</b> (copia el RUC; péguelo con Ctrl+V).</p>
 
-<h3>4. Genere los Excel y cárguelos en el UAFI</h3>
+<h3>4. Valide</h3>
+<p>Pulse <b style="color:#ef6c00">✔ Validar</b>: revisa todo con las reglas del manual de la UAFE sin generar nada.
+Si está bien dice <b>«Listo para generar»</b>; si no, explica cada problema y deja
+<span style="background:#f8d7da">en rojo</span> las facturas afectadas (pase el mouse para ver el detalle).
+Corrija y vuelva a validar.</p>
+
+<h3>5. Genere los Excel y cárguelos en el UAFI</h3>
 <ol>
 <li>Pulse <b style="color:#2e7d32">Generar Excel (CLI, OPR, TRA)</b> y elija la carpeta. Si algún dato
 podría no ser aceptado por la UAFE, se avisa antes.</li>
@@ -293,6 +299,7 @@ class VentanaSimple(QMainWindow):
         self.empresa: emp.Empresa | None = None
         self.lista: list[facturas.Factura] = []
         self._cargando = False
+        self._marcas: dict[tuple[str, str], list[str]] = {}   # (cliente, factura) -> problemas al validar
 
         # --- empresa y mes ---
         self.c_empresa = QComboBox()
@@ -352,6 +359,14 @@ class VentanaSimple(QMainWindow):
         botones_lista.addWidget(b_vaciar)
         botones_lista.addSpacing(16)
         botones_lista.addWidget(b_sri)
+        self.b_validar = QPushButton("✔ Validar")
+        self.b_validar.setToolTip("Revisa las facturas de la tabla con las reglas del manual de la UAFE, "
+                                  "sin generar los Excel")
+        self.b_validar.setStyleSheet(
+            "QPushButton { background: #ef6c00; color: white; font-weight: bold; padding: 4px 14px; border-radius: 4px; }"
+            "QPushButton:disabled { background: #f5c08f; }")
+        self.b_validar.clicked.connect(self.validar_tabla)
+        botones_lista.addWidget(self.b_validar)
         botones_lista.addStretch(1)
         botones_lista.addWidget(self.resumen)
 
@@ -478,8 +493,12 @@ class VentanaSimple(QMainWindow):
             return f"{cat.nombre('C', valor) or valor} ({valor})" if valor else ""
         return valor
 
-    def _mostrar_lista(self) -> None:
+    def _mostrar_lista(self, conservar_marcas: bool = False) -> None:
+        """Dibuja la tabla. Las marcas de «Validar» se quitan cuando algo cambia (conservar_marcas=False)."""
         from ..reglas import INSTRUMENTOS_POR_TRANSACCION
+
+        if not conservar_marcas:
+            self._marcas = {}
 
         self.lista.sort(key=lambda f: (f.fecha or dt.date.min, f.numero))
         directorio = self.empresa.directorio_clientes() if self.empresa else {}
@@ -527,6 +546,13 @@ class VentanaSimple(QMainWindow):
                 if campo == "adb":
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.tabla.setItem(fila, col, item)
+            # problemas encontrados al validar
+            problemas = self._marcas.get((f.id_cliente, f.numero))
+            if problemas:
+                for col in (0, C_FACT):
+                    it = self.tabla.item(fila, col)
+                    it.setBackground(QColor("#f8d7da"))
+                    it.setToolTip("⚠ Al validar:\n" + "\n".join(f"• {p}" for p in problemas))
             # tipo de transacción que no admite ese pago (tabla 2 del manual)
             permitidos = INSTRUMENTOS_POR_TRANSACCION.get(v["ttr"][0])
             inst = v["inst"][0]
@@ -545,6 +571,7 @@ class VentanaSimple(QMainWindow):
                              f"total <b>$ {total:,}</b>".replace(",", "."))
         hay = self.empresa is not None
         self.b_generar.setEnabled(hay and bool(self.lista))
+        self.b_validar.setEnabled(hay and bool(self.lista))
         self.b_uafi.setEnabled(hay)
         nombre = f" — {self.empresa.nombre} — {MESES[self.mes - 1]} {self.anio}" if hay else ""
         self.setWindowTitle("Generador RESU UAFE" + nombre)
@@ -857,34 +884,87 @@ class VentanaSimple(QMainWindow):
 
     # ------------------------------------------------------------------
     # Generar y UAFI
+    def _agencia_valida(self) -> str:
+        """Mensaje de error del código de agencia, o "" si está bien."""
+        e = self.empresa
+        agencia = e.agencia_defecto().strip()
+        if agencia.isdigit() and len(agencia) in (8, 9) and agencia.startswith(e.codigo):
+            return ""
+        return (f"El código de agencia ({agencia or 'vacío'}) debe tener 8 o 9 dígitos y empezar con el código de "
+                f"la empresa ({e.codigo}). Corríjalo en «Empresas…».")
+
+    def _revisar(self, lista: list[facturas.Factura] | None = None):
+        """Arma el reporte con la tabla y lo revisa con las reglas del manual.
+
+        Devuelve (reporte, errores, advertencias, afectadas) donde cada error/advertencia es un texto
+        «• Factura … (cliente): problema» y afectadas = {(cliente, factura): [problemas]}."""
+        e = self.empresa
+        rep, _props = imf.construir_reporte(e, self.anio, self.mes, lista if lista is not None else self.lista,
+                                            self._opciones(), self.anteriores)
+        errores, advertencias = [], []
+        afectadas: dict[tuple[str, str], list[str]] = {}
+        for m in validar(rep, e.estructura, e.catalogos):
+            cliente = rep.registro(m.ruta[:1]) if m.ruta else None
+            operacion = rep.registro(m.ruta[:2]) if len(m.ruta) >= 2 else None
+            if operacion is not None:
+                donde = f"Factura {operacion.get('NCT')} ({cliente.get('NRS')})"
+                claves = [(cliente.get("IDE"), operacion.get("NCT"))]
+            elif cliente is not None:
+                donde = f"Cliente {cliente.get('NRS')}"
+                claves = [(cliente.get("IDE"), o.get("NCT")) for o in cliente.hijos]
+            else:
+                donde, claves = "Reporte", []
+            (errores if m.es_error else advertencias).append(f"• {donde}: {m.texto}")
+            if m.es_error:
+                for k in claves:
+                    afectadas.setdefault(k, []).append(m.texto)
+        return rep, errores, advertencias, afectadas
+
+    def validar_tabla(self) -> None:
+        """Botón «Validar»: revisa sin generar y marca en la tabla las facturas con problemas."""
+        e = self.empresa
+        if e is None or not self.lista:
+            return
+        rep, errores, advertencias, afectadas = self._revisar()
+        agencia = self._agencia_valida()
+        if agencia:
+            errores.insert(0, f"• Empresa: {agencia}")
+        self._marcas = afectadas
+        self._mostrar_lista(conservar_marcas=True)
+        t = rep.totales(e.estructura)
+        resumen = (f"<b>{e.nombre} — {MESES[self.mes - 1]} {self.anio}</b><br>"
+                   f"Clientes: {t.get('CLIENTE', 0)} · Operaciones: {t.get('OPERACION', 0)} · "
+                   f"Total: $ {t.get('VVT', 0):,}".replace(",", "."))
+        if not errores:
+            texto = f"✔ <b>Listo para generar el Excel.</b><br><br>{resumen}"
+            if advertencias:
+                texto += (f"<br><br>Hay {len(advertencias)} advertencia(s) para revisar (no impiden generar):<br>"
+                          + "<br>".join(_html(a) for a in advertencias[:10]))
+            QMessageBox.information(self, "Validar", texto)
+            return
+        caja = QMessageBox(self)
+        caja.setIcon(QMessageBox.Warning)
+        caja.setWindowTitle("Validar")
+        caja.setTextFormat(Qt.RichText)
+        caja.setText(f"{resumen}<br><br>Hay <b>{len(errores)} problema(s)</b> que la UAFE podría no aceptar "
+                     f"(las facturas afectadas quedan <span style='background:#f8d7da'>en rojo</span> en la tabla):"
+                     "<br><br>" + "<br>".join(_html(x) for x in errores[:20]) + ("<br>…" if len(errores) > 20 else "")
+                     + (f"<br><br>Además, {len(advertencias)} advertencia(s)." if advertencias else ""))
+        caja.exec()
+
     def generar(self) -> None:
         e = self.empresa
         if e is None or not self.lista:
             return
-        agencia = e.agencia_defecto().strip()
-        if not (agencia.isdigit() and len(agencia) in (8, 9) and agencia.startswith(e.codigo)):
-            QMessageBox.warning(self, "Código de agencia", f"El código de agencia ({agencia or 'vacío'}) debe tener 8 o 9 "
-                                                          f"dígitos y empezar con el código de la empresa ({e.codigo}).\n"
-                                                          "Corríjalo en «Empresas…».")
+        agencia = self._agencia_valida()
+        if agencia:
+            QMessageBox.warning(self, "Código de agencia", agencia)
             return
         opciones = self._opciones()
-        rep, _props = imf.construir_reporte(e, self.anio, self.mes, self.lista, opciones, self.anteriores)
-        mensajes = [m for m in validar(rep, e.estructura, e.catalogos) if m.es_error]
+        rep, errores, _adv, afectadas = self._revisar()
+        mensajes, lineas = errores, errores
+        con_problema = set(afectadas)   # (cliente, factura)
         if mensajes:
-            con_problema: set[str] = set()   # números de factura afectados
-            lineas = []
-            for m in mensajes:
-                cliente = rep.registro(m.ruta[:1]) if m.ruta else None
-                operacion = rep.registro(m.ruta[:2]) if len(m.ruta) >= 2 else None
-                if operacion is not None:
-                    con_problema.add(operacion.get("NCT"))
-                    donde = f"Factura {operacion.get('NCT')} ({cliente.get('NRS')})"
-                elif cliente is not None:
-                    con_problema.update(o.get("NCT") for o in cliente.hijos)
-                    donde = f"Cliente {cliente.get('NRS')}"
-                else:
-                    donde = "Reporte"
-                lineas.append(f"• {donde}: {m.texto}")
             caja = QMessageBox(self)
             caja.setIcon(QMessageBox.Warning)
             caja.setWindowTitle("Revisar")
@@ -896,7 +976,7 @@ class VentanaSimple(QMainWindow):
             caja.setDefaultButton(b_cancelar)
             caja.exec()
             if caja.clickedButton() is b_sin:
-                lista = [f for f in self.lista if f.numero not in con_problema]
+                lista = [f for f in self.lista if (f.id_cliente, f.numero) not in con_problema]
                 if not lista:
                     QMessageBox.information(self, "Generar", "No queda ninguna factura para generar.")
                     return

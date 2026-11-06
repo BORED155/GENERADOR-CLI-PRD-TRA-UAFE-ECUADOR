@@ -446,3 +446,39 @@ def test_plantillas_con_errores_se_avisan(datos, uafi_zip, tmp_path, monkeypatch
     assert not v.importar_plantillas([str(rutas[0])])
     assert any("Falta la plantilla" in p for p in vistos)
     v.close()
+
+
+def test_boton_validar(datos, uafi_zip, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    informes, avisos = [], []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: informes.append(a[2])))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: avisos.append(self.text()) or 0)
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    e.agencia = CODIGO + "1000"
+    e.guardar()
+    e.recordar_clientes([{"IDE": CLIENTE, "TID": "R", "NRS": "CLIENTE FICTICIO S.A.", "AEC": "L6810"}])
+    v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    assert not v.b_validar.isEnabled()                       # sin facturas no hay qué validar
+    v.lista = [_factura("000000001", total="1000"), _factura("000000002", total="50")]   # 50 < mínimo 100
+    v._mostrar_lista()
+    v.validar_tabla()
+    assert avisos and "problema" in avisos[-1] and "000000002" in avisos[-1]
+    malo = next(r for r in range(2) if v.lista[r].numero.endswith("2"))
+    assert v.tabla.item(malo, simple.C_FACT).background().color().name() == "#f8d7da"
+    assert v.tabla.item(1 - malo, simple.C_FACT).background().style() == simple.Qt.NoBrush
+    # al cambiar algo, las marcas se quitan hasta volver a validar
+    v.cambiar_campo(0, "adb", "10")
+    assert v.tabla.item(malo, simple.C_FACT).background().style() == simple.Qt.NoBrush
+    # sin la factura mala: listo para generar
+    del v.lista[malo]
+    v._mostrar_lista()
+    v.validar_tabla()
+    assert "Listo para generar" in informes[-1]
+    v.close()
