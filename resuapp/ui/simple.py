@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 import json
 from pathlib import Path
 
@@ -65,7 +66,10 @@ empresa y el mes, <b>las revisa con las reglas del manual de la UAFE</b> y le di
 (con el cliente y la operación de cada uno). Si están bien, las carga en la tabla para revisarlas o cambiarlas.</p>
 
 <h3>3. Revise los datos de cada factura</h3>
-<p>Cada fila tiene: actividad económica, tipo de transacción, pago, tipo de bien, área del bien y cantón.</p>
+<p>Cada fila tiene: actividad económica, tipo de transacción, pago, tipo de bien, área del bien, cantón,
+<b>total</b> y <b>forma de pago</b>. El total y la forma de pago vienen de la factura; si los cambia, quedan
+<b>en negrita</b> (el mouse muestra lo que decía la factura). Al cambiar la forma de pago, el pago de la UAFE
+se ajusta solo (por ejemplo, 19 tarjeta de crédito → tarjeta de crédito).</p>
 <ul>
 <li><b>Flechita ▾</b>: elegir de la lista. &nbsp; <b>Doble clic</b>: escribir para buscar
 (por nombre o código, sin importar tildes).</li>
@@ -215,8 +219,36 @@ class DelegadoLista(QStyledItemDelegate):
         if self.campo == "aec":
             if codigo != (index.data(Qt.UserRole) or ""):
                 self.ventana.guardar_actividad(self.ventana.lista[index.row()], codigo)
+        elif self.campo == "fp":
+            self.ventana.cambiar_forma_pago(index.row(), codigo)
         else:
             self.ventana.cambiar_campo(index.row(), self.campo, codigo)
+
+
+class DelegadoTotal(QStyledItemDelegate):
+    """Total de la factura: doble clic para escribirlo (acepta 1234,56 o 1234.56)."""
+
+    def __init__(self, ventana: "VentanaSimple"):
+        super().__init__(ventana)
+        self.ventana = ventana
+
+    def createEditor(self, parent, option, index):
+        from PySide6.QtCore import QRegularExpression
+        from PySide6.QtGui import QRegularExpressionValidator
+
+        e = QLineEdit(parent)
+        e.setAlignment(Qt.AlignRight)
+        e.setValidator(QRegularExpressionValidator(QRegularExpression(r"\d{1,12}([.,]\d{0,2})?"), e))
+        return e
+
+    def setEditorData(self, editor, index):
+        editor.setText(str(index.data(Qt.UserRole) or ""))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        texto = editor.text().strip().replace(",", ".")
+        if texto:
+            self.ventana.cambiar_total(index.row(), texto)
 
 
 class DelegadoArea(QStyledItemDelegate):
@@ -347,6 +379,9 @@ class VentanaSimple(QMainWindow):
         for col, delegado in self.delegados.items():
             self.tabla.setItemDelegateForColumn(col, delegado)
         self.tabla.setItemDelegateForColumn(C_ADB, DelegadoArea(self))
+        self.delegados[C_FP] = DelegadoLista(self, "fp")
+        self.tabla.setItemDelegateForColumn(C_FP, self.delegados[C_FP])
+        self.tabla.setItemDelegateForColumn(C_TOTAL, DelegadoTotal(self))
         self.anteriores: dict[str, dict[str, str]] = {}
         self.previos: list[Reporte] = []
         self.tabla.cellDoubleClicked.connect(self._doble_clic)
@@ -475,6 +510,8 @@ class VentanaSimple(QMainWindow):
             return dict(imf.NOMBRE_INSTRUMENTO)
         if campo == "cco":
             return cat.tabla("C")
+        if campo == "fp":
+            return dict(imf.FORMAS_PAGO_SRI)
         return {}
 
     def _texto_campo(self, campo: str, valor: str) -> str:
@@ -514,8 +551,35 @@ class VentanaSimple(QMainWindow):
             v = imf.valores_factura(f, opciones, self.anteriores, self._canton_cliente(f, directorio))
             valores = [f.nombre_cliente, f.id_cliente, actividad, "", "", "", "", "", f.numero,
                        f.fecha.strftime("%d/%m/%Y") if f.fecha else "", f"{f.total:,.2f}", formas, f.archivo]
+            negrita = self.tabla.font()
+            negrita.setBold(True)
             for col, texto in enumerate(valores):
                 item = QTableWidgetItem(texto)
+                if col == C_TOTAL:
+                    item.setData(Qt.UserRole, str(f.total))
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    original = f.resu.get("total_factura")
+                    if original is not None and Decimal(original) != f.total:
+                        item.setFont(negrita)
+                        texto_ayuda = f"Cambiado a mano (la factura dice {Decimal(original):,.2f})"
+                    else:
+                        texto_ayuda = "Total de la factura"
+                    item.setToolTip(f"{texto}\n{texto_ayuda}\nDoble clic para cambiarlo")
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.tabla.setItem(fila, col, item)
+                    continue
+                if col == C_FP:
+                    codigos = [c for c, _v in f.pagos]
+                    item.setData(Qt.UserRole, codigos[0] if len(codigos) == 1 else "")
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    cambio = f.resu.get("fp_factura")
+                    if cambio is not None:
+                        item.setFont(negrita)
+                    item.setToolTip(f"{texto}\n" + (f"Cambiada a mano (la factura dice: {cambio or 'nada'})\n"
+                                                    if cambio is not None else "")
+                                    + "Flechita: elegir del catálogo · Doble clic: escribir para buscar")
+                    self.tabla.setItem(fila, col, item)
+                    continue
                 item.setToolTip({C_AEC: f"{texto}\nFlechita: elegir de la lista · Doble clic: escribir para buscar\n"
                                         "(una por cliente: vale para todas sus facturas)",
                                  C_RUC: f"{texto}\nDoble clic para copiarlo"}.get(col, texto))
@@ -589,6 +653,40 @@ class VentanaSimple(QMainWindow):
             self.lista[r].resu[campo] = valor
         self._mostrar_lista()
         self.statusBar().showMessage(f"{NOMBRE_CAMPO[campo].capitalize()} cambiado en {len(filas)} factura(s).", 6000)
+
+    def cambiar_total(self, fila: int, texto: str) -> None:
+        from decimal import InvalidOperation
+
+        try:
+            valor = Decimal(texto).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return
+        if fila >= len(self.lista) or valor <= 0:
+            self.statusBar().showMessage("El total debe ser mayor que cero.", 6000)
+            return
+        f = self.lista[fila]
+        if valor == f.total:
+            return
+        f.resu.setdefault("total_factura", str(f.total))   # para mostrar lo que decía la factura
+        if len(f.pagos) == 1:
+            f.pagos = [(f.pagos[0][0], valor)]
+        f.total = valor
+        self._mostrar_lista()
+        self.statusBar().showMessage(f"Total de la factura {f.numero} cambiado a {valor:,.2f}.", 6000)
+
+    def cambiar_forma_pago(self, fila: int, codigo: str) -> None:
+        """Forma de pago del SRI elegida a mano: el pago de la UAFE se vuelve a deducir de ella."""
+        if not codigo or fila >= len(self.lista):
+            return
+        filas = self._filas_objetivo(fila)
+        for r in filas:
+            f = self.lista[r]
+            f.resu.setdefault("fp_factura", ", ".join(c for c, _v in f.pagos))
+            f.pagos = [(codigo, f.total)]
+            f.resu.pop("inst", None)   # el pago (instrumento) sale de la forma de pago, salvo que se elija
+        self._mostrar_lista()
+        self.statusBar().showMessage(f"Forma de pago {codigo} {imf.FORMAS_PAGO_SRI.get(codigo, '')} en "
+                                     f"{len(filas)} factura(s).", 6000)
 
     def volver_automatico(self, filas: list[int], campo: str) -> None:
         for r in filas:
@@ -865,7 +963,7 @@ class VentanaSimple(QMainWindow):
             return
         if columna == C_RUC:
             self.copiar_ruc(self.lista[fila].id_cliente)
-        elif columna == C_AEC or columna in CAMPO_COLUMNA:
+        elif columna in (C_AEC, C_FP, C_TOTAL) or columna in CAMPO_COLUMNA:
             if columna in self.delegados:
                 self.delegados[columna].modo = "escribir"   # doble clic: escribir para buscar
             self.tabla.editItem(self.tabla.item(fila, columna))

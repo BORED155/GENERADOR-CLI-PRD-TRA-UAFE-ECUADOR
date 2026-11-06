@@ -482,3 +482,57 @@ def test_boton_validar(datos, uafi_zip, monkeypatch):
     v.validar_tabla()
     assert "Listo para generar" in informes[-1]
     v.close()
+
+
+def test_editar_total_y_forma_de_pago(datos, uafi_zip, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    v = simple.VentanaSimple()
+    v.c_empresa.setCurrentIndex(1)
+    v.c_mes.setCurrentIndex(1)
+    v.s_anio.setValue(2026)
+    v.lista = [_factura("000000001", total="1000"), _factura("000000002", total="500")]
+    v._mostrar_lista()
+    # total
+    v.cambiar_total(0, "1234.56")
+    assert v.lista[0].total == Decimal("1234.56") and v.tabla.item(0, simple.C_TOTAL).font().bold()
+    assert "1,000.00" in v.tabla.item(0, simple.C_TOTAL).toolTip()          # lo que decía la factura
+    v.cambiar_total(1, "0")                                                  # no se acepta
+    assert v.lista[1].total == Decimal("500")
+    # forma de pago en las dos (seleccionadas): tarjeta de crédito -> pago VTC
+    v.tabla.selectAll()
+    v.cambiar_forma_pago(0, "19")
+    assert [f.pagos[0][0] for f in v.lista] == ["19", "19"]
+    assert [v.tabla.item(r, simple.C_INST).data(simple.Qt.UserRole) for r in range(2)] == ["VTC", "VTC"]
+    rep, _ = imf.construir_reporte(e, 2026, 2, v.lista, v._opciones(), v.anteriores)
+    ops = {o.get("NCT"): o for c in rep.clientes for o in c.hijos}
+    o1 = ops["001-001-000000001"]
+    assert (o1.get("VTO"), o1.hijos[0].get("VVT"), o1.hijos[0].get("VTC")) == ("1234", "1234", "1234")
+    v.close()
+
+
+def test_editar_total_y_pago_en_plantillas(datos, uafi_zip, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    _orig, rutas = _plantillas(e, tmp_path)
+    v = simple.VentanaSimple()
+    assert v.importar_plantillas([str(r) for r in rutas])
+    fila = next(r for r, f in enumerate(v.lista) if f.numero.endswith("1"))   # 1000 con débito
+    v.cambiar_total(fila, "1500")
+    v.tabla.clearSelection()
+    v.cambiar_forma_pago(fila, "01")                                          # sin sistema financiero -> efectivo
+    rep, _ = imf.construir_reporte(v.empresa, 2026, 2, v.lista, v._opciones(), v.anteriores)
+    o = next(o for c in rep.clientes for o in c.hijos if o.get("NCT").endswith("1"))
+    t = o.hijos[0]
+    assert (o.get("VTO"), t.get("VVT"), t.get("VEF"), t.get("VDE")) == ("1500", "1500", "1500", "0")
+    v.close()

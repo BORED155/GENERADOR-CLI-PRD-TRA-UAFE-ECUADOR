@@ -443,15 +443,24 @@ def operacion_desde_original(p: Propuesta) -> Registro:
         valor = getattr(p, campo)
         if valor and valor != antes.get(campo):
             op.valores[clave] = valor
+    total = str(int(f.total))
+    total_cambiado = total != (orig["op"].get("VTO") or "")
+    if total_cambiado:
+        op.valores["VTO"] = total
     for t in orig["trs"]:
         tr = Registro(dict(t))
         if p.ttr and p.ttr != antes.get("ttr"):
             tr.valores["TTR"] = p.ttr
-        if len(orig["trs"]) == 1 and p.instrumento and p.instrumento != antes.get("inst") and p.instrumento_fijo:
-            total = tr.get("VVT") or str(sum(int(tr.get(n) or "0") for n in INSTRUMENTOS))
-            for n in INSTRUMENTOS:
-                tr.valores[n] = "0"
-            tr.valores[p.instrumento] = total
+        if len(orig["trs"]) == 1:
+            inst = p.instrumento if p.instrumento and p.instrumento != antes.get("inst") else \
+                (_instrumento_unico(tr) or p.instrumento)
+            if total_cambiado or inst != _instrumento_unico(tr):
+                valor = total if total_cambiado else (tr.get("VVT") or
+                                                      str(sum(int(tr.get(n) or "0") for n in INSTRUMENTOS)))
+                for n in INSTRUMENTOS:
+                    tr.valores[n] = "0"
+                tr.valores[inst] = valor
+                tr.valores["VVT"] = valor
         op.hijos.append(tr)
     return op
 
