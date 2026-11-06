@@ -49,9 +49,13 @@ class Factura:
     pagos: list[tuple[str, Decimal]] = field(default_factory=list)   # (forma de pago SRI, valor)
     # Datos del RESU elegidos por el usuario para esta factura (ttr, inst, ttb, adb, cco); vacío = automático
     resu: dict[str, str] = field(default_factory=dict)
+    # Operación tal como vino de las plantillas CLI/OPR/TRA (al regenerar se conserva lo no cambiado)
+    original: dict = field(default_factory=dict)
 
     @property
     def numero(self) -> str:
+        if not self.estab and not self.pto_emi:   # número libre (p. ej. un contrato traído del OPR)
+            return self.secuencial
         return f"{self.estab}-{self.pto_emi}-{self.secuencial}"
 
     @property

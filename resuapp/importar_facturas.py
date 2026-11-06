@@ -240,7 +240,7 @@ def analizar(leidos: list[Factura | NoLeido], empresa: Empresa, rep: Reporte, op
         if empresa.ruc and f.ruc_emisor and f.ruc_emisor != empresa.ruc:
             omitir(f"No la emitió {empresa.nombre} (RUC emisor {f.ruc_emisor}): ¿es una compra?")
             continue
-        if f.fecha is None or f.fecha.strftime("%Y%m") != rep.periodo[:6]:
+        if f.origen != "excel" and (f.fecha is None or f.fecha.strftime("%Y%m") != rep.periodo[:6]):
             fecha = f.fecha.strftime("%d/%m/%Y") if f.fecha else "sin fecha"
             omitir(f"Es de otro mes ({fecha}); el reporte es de {rep.periodo[4:6]}/{rep.periodo[:4]}")
             continue
@@ -250,12 +250,12 @@ def analizar(leidos: list[Factura | NoLeido], empresa: Empresa, rep: Reporte, op
         if not f.id_cliente:
             omitir("No se encontró la identificación del cliente")
             continue
-        clave = f.clave_acceso or f"{f.ruc_emisor}{f.numero}"
+        clave = f.clave_acceso or f"{f.ruc_emisor}|{f.id_cliente}|{f.numero}"
         if clave in vistos:
             omitir("Repetida en esta selección")
             continue
         vistos.add(clave)
-        if (f.id_cliente, f.numero) in ya_en_reporte:
+        if f.origen != "excel" and (f.id_cliente, f.numero) in ya_en_reporte:
             omitir("Ya está en el reporte")
             continue
         if int(f.total) < 1:
@@ -324,6 +324,10 @@ def aplicar(rep: Reporte, propuestas: list[Propuesta], empresa: Empresa, opcione
             for k, v in p.cliente.items():
                 if v and not cliente.get(k):
                     cliente.valores[k] = v
+        if f.original:
+            cliente.hijos.append(operacion_desde_original(p))
+            agregadas += 1
+            continue
         fecha = f.fecha.strftime("%Y%m%d")
         total = str(int(f.total))
         operacion = Registro({"NCT": f.numero, "VTO": total, "FDO": fecha, "TTB": p.ttb or opciones.ttb,
@@ -384,6 +388,72 @@ def construir_reporte(empresa: Empresa, anio: int, mes: int, lista: list[Factura
             op.valores["DRB"] = op.get("DRB") or cliente.get("DIR")
             op.valores["CCO"] = op.get("CCO") or cliente.get("CCC")
     return rep, propuestas
+
+
+# ----------------------------------------------------------------------
+# Plantillas CLI / OPR / TRA -> filas de la tabla (una por operación)
+TIPO_ID_SRI = {v: k for k, v in TIPO_ID.items()}   # R -> 04, C -> 05…
+
+
+def _instrumento_unico(t: Registro) -> str:
+    usados = [n for n in INSTRUMENTOS if (t.get(n) or "0") not in ("", "0")]
+    return usados[0] if len(usados) == 1 else ""
+
+
+def facturas_desde_reporte(rep: Reporte) -> list[Factura]:
+    """Cada operación del reporte como una fila; lo que trae queda como elegido para esa fila."""
+    import datetime as dt
+
+    salida: list[Factura] = []
+    for c in rep.clientes:
+        for op in c.hijos:
+            nct = op.get("NCT")
+            m = re.fullmatch(r"(\d{3})-(\d{3})-(\d{1,9})", nct)
+            f = Factura(f"Plantillas {rep.periodo[4:6]}/{rep.periodo[:4]}", origen="excel",
+                        tipo_id_cliente=TIPO_ID_SRI.get(c.get("TID"), ""), id_cliente=c.get("IDE"),
+                        nombre_cliente=c.get("NRS"), direccion_cliente=c.get("DIR"),
+                        estab=m.group(1) if m else "", pto_emi=m.group(2) if m else "",
+                        secuencial=m.group(3) if m else nct)
+            fecha = op.get("FDO") or (op.hijos[0].get("FTR") if op.hijos else "")
+            try:
+                f.fecha = dt.date(int(fecha[:4]), int(fecha[4:6]), int(fecha[6:8]))
+            except (ValueError, IndexError):
+                f.fecha = None
+            f.total = Decimal(op.get("VTO") or "0")
+            f.resu = {"ttb": op.get("TTB"), "adb": op.get("ADB"), "cco": op.get("CCO")}
+            ttrs = {t.get("TTR") for t in op.hijos}
+            if len(ttrs) == 1:
+                f.resu["ttr"] = next(iter(ttrs))
+            if len(op.hijos) == 1 and _instrumento_unico(op.hijos[0]):
+                f.resu["inst"] = _instrumento_unico(op.hijos[0])
+            f.resu = {k: v for k, v in f.resu.items() if v}
+            f.original = {"op": dict(op.valores), "trs": [dict(t.valores) for t in op.hijos],
+                          "resu": dict(f.resu)}
+            salida.append(f)
+    return salida
+
+
+def operacion_desde_original(p: Propuesta) -> Registro:
+    """Rehace la operación importada; solo cambia lo que el usuario cambió en la tabla."""
+    f = p.factura
+    orig = f.original
+    antes = orig.get("resu", {})
+    op = Registro(dict(orig["op"]))
+    for campo, clave in (("ttb", "TTB"), ("adb", "ADB"), ("cco", "CCO")):
+        valor = getattr(p, campo)
+        if valor and valor != antes.get(campo):
+            op.valores[clave] = valor
+    for t in orig["trs"]:
+        tr = Registro(dict(t))
+        if p.ttr and p.ttr != antes.get("ttr"):
+            tr.valores["TTR"] = p.ttr
+        if len(orig["trs"]) == 1 and p.instrumento and p.instrumento != antes.get("inst") and p.instrumento_fijo:
+            total = tr.get("VVT") or str(sum(int(tr.get(n) or "0") for n in INSTRUMENTOS))
+            for n in INSTRUMENTOS:
+                tr.valores[n] = "0"
+            tr.valores[p.instrumento] = total
+        op.hijos.append(tr)
+    return op
 
 
 def factura_a_dict(f: Factura) -> dict:

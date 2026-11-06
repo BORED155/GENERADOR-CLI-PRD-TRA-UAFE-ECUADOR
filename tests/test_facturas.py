@@ -5,20 +5,9 @@ from fabrica import CODIGO
 from resuapp import empresas, facturas, importar_facturas as imf, reglas
 from resuapp.modelo import Reporte
 
-import pytest
-
 RUC_EMPRESA = "1799999907001"
 
 
-@pytest.fixture(autouse=True)
-def _cargar_guardadas_sin_preguntar(monkeypatch):
-    """En las pruebas, la pregunta «¿cargar las facturas guardadas?» responde «Cargar»."""
-    from resuapp.ui import simple
-
-    respuestas: list = []
-    monkeypatch.setattr(simple.VentanaSimple, "_preguntar_cargar",
-                        lambda self, n, fecha: respuestas.append(n) or getattr(self, "_respuesta_prueba", True))
-    return respuestas
 CLIENTE = "1799999915001"
 
 
@@ -167,7 +156,7 @@ def test_ventana_simple(datos, uafi_zip, tmp_path, monkeypatch):
     v2.c_empresa.setCurrentIndex(1)
     v2.c_mes.setCurrentIndex(1)
     v2.s_anio.setValue(2026)
-    assert len(v2.lista) == 1                                   # la lista del mes queda guardada
+    assert len(v2.lista) == 0                                   # cada vez empieza desde cero
     v.close(); v2.close()
 
 
@@ -243,7 +232,6 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     v.c_mes.setCurrentIndex(1)
     v.s_anio.setValue(2026)
     v.lista = [_factura("000000001"), _factura("000000002"), _factura("000000003", cliente="1799999923001")]
-    v._guardar_lista()
     v._mostrar_lista()
     ttb_defecto = v.tabla.item(0, simple.C_TTB).data(simple.Qt.UserRole)
     assert v.tabla.item(0, simple.C_TTB).font().italic()            # por defecto: en cursiva
@@ -265,14 +253,7 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     # volver al automático
     v.volver_automatico([0], "ttb")
     assert "ttb" not in v.lista[0].resu
-    # al reabrir el mes, las elecciones siguen ahí
-    v2 = VentanaSimple()
-    v2.c_empresa.setCurrentIndex(1)
-    v2.c_mes.setCurrentIndex(1)
-    v2.s_anio.setValue(2026)
-    assert [f.resu.get("adb") for f in v2.lista] == [None, "150", "150"]
-    assert v2.tabla.item(1, simple.C_ADB).text() == "150"
-    v.close(); v2.close()
+    v.close()
 
 
 def test_lista_de_cantones(datos, uafi_zip):
@@ -312,7 +293,6 @@ def test_flechita_lista_y_doble_clic_escribir(datos, uafi_zip, monkeypatch):
     v.c_mes.setCurrentIndex(1)
     v.s_anio.setValue(2026)
     v.lista = [_factura("000000001")]
-    v._guardar_lista()
     v._mostrar_lista()
     app.processEvents()
     t = v.tabla
@@ -376,58 +356,93 @@ def test_abre_limpia_y_ayuda(datos, uafi_zip):
     v.c_mes.setCurrentIndex(1)
     v.s_anio.setValue(2026)
     v.lista = [_factura("000000001")]
-    v._guardar_lista()
     v.close()
     # al volver a abrir: sin empresa, tabla vacía y botones desactivados
     v2 = simple.VentanaSimple()
     assert v2.c_empresa.currentIndex() == 0 and v2.empresa is None
     assert v2.tabla.rowCount() == 0 and not v2.b_generar.isEnabled()
     assert v2.datos_empresa["ruc"].text() == "—"
-    # al elegir la empresa y el mes, aparece lo que ya se había trabajado en ese mes
+    # al elegir la empresa y el mes, también empieza vacía
     v2.c_empresa.setCurrentIndex(1)
     v2.c_mes.setCurrentIndex(1)
     v2.s_anio.setValue(2026)
-    assert v2.tabla.rowCount() == 1
+    assert v2.tabla.rowCount() == 0
     assert "Flechita" in simple.AYUDA and "Generar Excel" in simple.AYUDA
     v2.close()
 
 
-def test_pregunta_si_cargar_las_guardadas(datos, uafi_zip, _cargar_guardadas_sin_preguntar):
+
+# --- plantillas CLI, OPR y TRA -------------------------------------------------------------
+
+def _plantillas(e, carpeta, **cambio_tra):
+    """Genera plantillas de febrero 2026 con 3 operaciones (2 clientes) y, si se pide, cambia un dato del TRA."""
+    from openpyxl import load_workbook
+
+    from resuapp import excel
+
+    op = imf.Opciones(ttr="96", ttb="DEP", adb="0", instrumento_20="VDE", aec="L6810", ccc="1701")
+    lista = [_factura("000000001", total="1000"),
+             _factura("000000002", total="2500", resu={"ttr": "94", "inst": "VCH", "ttb": "CAS", "adb": "120"}),
+             _factura("000000003", total="800", cliente="1799999923001")]
+    rep, _ = imf.construir_reporte(e, 2026, 2, lista, op)
+    rutas = excel.exportar(rep, e.estructura, carpeta)
+    if cambio_tra:
+        tra = next(r for r in rutas if r.name.upper().startswith("TRA"))
+        libro = load_workbook(tra)
+        hoja = libro.worksheets[0]
+        nombres = [n.nombre for n in e.estructura.niveles[2].campos]
+        for campo, valor in cambio_tra.items():   # fila 2 = primera transacción (pagada con débito)
+            hoja.cell(row=2, column=nombres.index(campo) + 1, value=valor)
+        libro.save(tra)
+    return rep, rutas
+
+
+def test_plantillas_correctas_se_cargan_y_se_regeneran_igual(datos, uafi_zip, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from resuapp.ui import simple
+
+    app = QApplication.instance() or QApplication([])
+    avisos = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: avisos.append(a[2])))
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    original, rutas = _plantillas(e, tmp_path)
+    v = simple.VentanaSimple()                     # sin empresa: la elige sola por el código
+    assert v.importar_plantillas([str(r) for r in reversed(rutas)])   # en cualquier orden
+    assert v.empresa.id == e.id and (v.mes, v.anio) == (2, 2026)
+    assert v.tabla.rowCount() == 3 and v.ultima_revision == []
+    assert "sin errores" in avisos[-1]
+    # al generar otra vez sin cambiar nada, sale igual a las plantillas
+    nuevo, _ = imf.construir_reporte(v.empresa, 2026, 2, v.lista, v._opciones(), v.anteriores)
+    def plano(rep):
+        return sorted((c.get("IDE"), o.get("NCT"), tuple(sorted(o.valores.items())),
+                       tuple(tuple(sorted(t.valores.items())) for t in o.hijos))
+                      for c in rep.clientes for o in c.hijos)
+    assert plano(nuevo) == plano(original)
+    # un cambio en la tabla se refleja solo en esa operación
+    v.cambiar_campo(0, "ttb", "CAS")
+    nuevo, _ = imf.construir_reporte(v.empresa, 2026, 2, v.lista, v._opciones(), v.anteriores)
+    assert sorted(o.get("TTB") for c in nuevo.clientes for o in c.hijos) == ["CAS", "CAS", "DEP"]
+    v.close()
+
+
+def test_plantillas_con_errores_se_avisan(datos, uafi_zip, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
     from resuapp.ui import simple
 
     app = QApplication.instance() or QApplication([])
-    preguntas = _cargar_guardadas_sin_preguntar
-    empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    e = empresas.crear("Constructora Prueba", CODIGO, uafi_zip, ruc=RUC_EMPRESA)
+    _rep, rutas = _plantillas(e, tmp_path, TTR="92")   # venta pagada con débito: no lo admite el manual
+    vistos = []
+    monkeypatch.setattr(simple.VentanaSimple, "_confirmar_problemas",
+                        lambda self, resumen, problemas: vistos.extend(problemas) or False)
     v = simple.VentanaSimple()
-    v.c_empresa.setCurrentIndex(1)
-    v.c_mes.setCurrentIndex(1)
-    v.s_anio.setValue(2026)
-    v.lista = [_factura("000000001"), _factura("000000002")]
-    v._guardar_lista()
+    assert not v.importar_plantillas([str(r) for r in rutas])
+    assert any("tabla 2 del manual" in p and "001-001-000000001" in p for p in vistos), vistos
+    assert v.tabla.rowCount() == 0                         # «No cargar»
+    # faltan plantillas
+    vistos.clear()
+    assert not v.importar_plantillas([str(rutas[0])])
+    assert any("Falta la plantilla" in p for p in vistos)
     v.close()
-    # «Empezar de cero»: tabla vacía, y no vuelve a preguntar en la sesión
-    v2 = simple.VentanaSimple()
-    v2._respuesta_prueba = False
-    v2.c_empresa.setCurrentIndex(1)
-    v2.s_anio.setValue(2026)
-    preguntas.clear()
-    v2.c_mes.setCurrentIndex(1)
-    assert preguntas == [2] and v2.tabla.rowCount() == 0
-    v2.c_mes.setCurrentIndex(2)
-    v2.c_mes.setCurrentIndex(1)
-    assert preguntas == [2] and v2.tabla.rowCount() == 0      # no insiste
-    # si agrega facturas después de empezar de cero, esas son las que quedan
-    v2.lista = [_factura("000000009")]
-    v2._guardar_lista()
-    v2.c_mes.setCurrentIndex(2)
-    v2.c_mes.setCurrentIndex(1)
-    assert v2.tabla.rowCount() == 1
-    # «Cargar las facturas»
-    v3 = simple.VentanaSimple()
-    v3.c_empresa.setCurrentIndex(1)
-    v3.s_anio.setValue(2026)
-    v3.c_mes.setCurrentIndex(1)
-    assert v3.tabla.rowCount() == 1
-    v2.close(); v3.close()

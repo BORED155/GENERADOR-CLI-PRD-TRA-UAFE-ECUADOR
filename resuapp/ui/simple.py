@@ -40,7 +40,8 @@ ORIGEN = {
 }
 URL_CONSULTA_RUC = "https://srienlinea.sri.gob.ec/sri-en-linea/SriRucWeb/ConsultaRuc/Consultas/consultaRuc"
 MARCA = ("Arrastre aquí los XML o PDF de sus facturas de venta del mes\n"
-         "(también carpetas, ZIP o el TXT de comprobantes emitidos del SRI)")
+         "(también carpetas, ZIP o el TXT de comprobantes emitidos del SRI)\n\n"
+         "o las plantillas CLI, OPR y TRA para revisarlas y cargarlas")
 
 
 AYUDA = """
@@ -50,14 +51,18 @@ para cargarlos en el UAFI de la empresa.</p>
 
 <h3>1. Elija la empresa y el mes</h3>
 <p>Arriba, en <b>Empresa</b>, escoja con cuál va a trabajar, y el <b>mes y año</b> del reporte.
-Si la empresa no está en la lista, agréguela con <b>«Empresas…»</b> (necesita su archivo uafi.zip).<br>
-Si ese mes ya tenía facturas agregadas, aparecen para seguir donde se quedó.</p>
+Si la empresa no está en la lista, agréguela con <b>«Empresas…»</b> (necesita su archivo uafi.zip).
+La tabla empieza vacía: agregue las facturas que necesite de ese mes.</p>
 
 <h3>2. Agregue las facturas de venta</h3>
 <p><b>Arrastre</b> a la tabla los XML o PDF de las facturas (también una carpeta, un ZIP o el TXT de
 comprobantes emitidos del SRI), o use <b>«Agregar facturas…»</b>.<br>
 Solo se toman <b>facturas de venta de la empresa, del mes elegido y con cliente identificado</b>
 (no consumidor final). Las demás se avisan y no se agregan.</p>
+
+<p><b>¿Ya tiene las plantillas CLI, OPR y TRA?</b> Arrástrelas juntas a la tabla: el programa elige la
+empresa y el mes, <b>las revisa con las reglas del manual de la UAFE</b> y le dice si tienen errores
+(con el cliente y la operación de cada uno). Si están bien, las carga en la tabla para revisarlas o cambiarlas.</p>
 
 <h3>3. Revise los datos de cada factura</h3>
 <p>Cada fila tiene: actividad económica, tipo de transacción, pago, tipo de bien, área del bien y cantón.</p>
@@ -87,10 +92,16 @@ cargue CLI, OPR y TRA, pulse <b>Validar</b> y luego <b>Guardar</b>.</li>
 <p>Abajo se ven nombre, RUC, código de registro, usuario SISLAFT y código de agencia.
 <b>Doble clic</b> en un dato lo copia para pegarlo en el SISLAFT o el UAFI. Se corrigen en «Empresas…».</p>
 
-<h3>Qué se guarda solo</h3>
-<p>Las facturas de cada mes, lo que elija en cada una y la actividad económica de cada cliente:
-se recuerdan para los meses siguientes.</p>
+<h3>Qué se recuerda solo</h3>
+<p>La actividad económica de cada cliente y, de los reportes generados, lo que usó con cada cliente
+(tipo de transacción, pago, tipo de bien, área y cantón): el mes siguiente sale en azul.</p>
 """
+
+
+def _html(texto: str) -> str:
+    import html
+
+    return html.escape(texto)
 
 
 class DelegadoLista(QStyledItemDelegate):
@@ -282,8 +293,6 @@ class VentanaSimple(QMainWindow):
         self.empresa: emp.Empresa | None = None
         self.lista: list[facturas.Factura] = []
         self._cargando = False
-        # (empresa, año, mes) -> True si se cargan las facturas guardadas; se pregunta una vez por sesión
-        self._decision: dict[tuple[str, int, int], bool] = {}
 
         # --- empresa y mes ---
         self.c_empresa = QComboBox()
@@ -426,52 +435,13 @@ class VentanaSimple(QMainWindow):
     def mes(self) -> int:
         return self.c_mes.currentIndex() + 1
 
-    def _ruta_lista(self) -> Path | None:
-        if self.empresa is None:
-            return None
-        return self.empresa.carpeta_reportes / f"FACTURAS{self.empresa.codigo}{periodo(self.anio, self.mes)}.json"
-
     def _cargar_lista(self) -> None:
         from ..modelo import periodo as _periodo
 
         self.anteriores = imf.ultimos_por_cliente(self.previos, antes_de=_periodo(self.anio, self.mes)) \
             if self.empresa else {}
-        self.lista = []
-        ruta = self._ruta_lista()
-        if ruta is not None and ruta.is_file():
-            try:
-                guardadas = [imf.factura_de_dict(d) for d in json.loads(ruta.read_text("utf-8"))]
-            except (OSError, ValueError, KeyError):
-                guardadas = []
-            clave = (self.empresa.id, self.anio, self.mes)
-            if guardadas and clave not in self._decision:
-                fecha = dt.datetime.fromtimestamp(ruta.stat().st_mtime)
-                self._decision[clave] = self._preguntar_cargar(len(guardadas), fecha)
-            if self._decision.get(clave, True):
-                self.lista = guardadas
+        self.lista = []   # siempre desde cero: se agregan las facturas que se necesiten del mes
         self._mostrar_lista()
-
-    def _preguntar_cargar(self, cantidad: int, fecha: dt.datetime) -> bool:
-        """¿Cargar las facturas guardadas de este mes? (se pregunta una vez por empresa y mes)."""
-        caja = QMessageBox(self)
-        caja.setIcon(QMessageBox.Question)
-        caja.setWindowTitle("Facturas guardadas")
-        caja.setTextFormat(Qt.RichText)
-        caja.setText(f"<b>{self.empresa.nombre} — {MESES[self.mes - 1]} {self.anio}</b><br><br>"
-                     f"Este mes tiene <b>{cantidad} factura(s) guardada(s)</b> "
-                     f"(última modificación: {fecha:%d/%m/%Y %H:%M}).")
-        cargar = caja.addButton("Cargar las facturas", QMessageBox.AcceptRole)
-        caja.addButton("Empezar de cero", QMessageBox.RejectRole)
-        caja.setDefaultButton(cargar)
-        caja.exec()
-        return caja.clickedButton() is cargar
-
-    def _guardar_lista(self) -> None:
-        ruta = self._ruta_lista()
-        if ruta is not None:
-            self._decision[(self.empresa.id, self.anio, self.mes)] = True   # lo guardado es la lista actual
-            ruta.write_text(json.dumps([imf.factura_a_dict(f) for f in self.lista], ensure_ascii=False, indent=1),
-                            "utf-8")
 
     def _canton_cliente(self, f: facturas.Factura, directorio: dict) -> str:
         datos = directorio.get(f.id_cliente, {})
@@ -590,14 +560,12 @@ class VentanaSimple(QMainWindow):
         filas = self._filas_objetivo(fila)
         for r in filas:
             self.lista[r].resu[campo] = valor
-        self._guardar_lista()
         self._mostrar_lista()
         self.statusBar().showMessage(f"{NOMBRE_CAMPO[campo].capitalize()} cambiado en {len(filas)} factura(s).", 6000)
 
     def volver_automatico(self, filas: list[int], campo: str) -> None:
         for r in filas:
             self.lista[r].resu.pop(campo, None)
-        self._guardar_lista()
         self._mostrar_lista()
 
     def aplicar_al_cliente(self, fila: int, campo: str) -> None:
@@ -610,7 +578,6 @@ class VentanaSimple(QMainWindow):
             if otra.id_cliente == f.id_cliente:
                 otra.resu[campo] = valor
                 n += 1
-        self._guardar_lista()
         self._mostrar_lista()
         self.statusBar().showMessage(f"{NOMBRE_CAMPO[campo].capitalize()} aplicado a {n} factura(s) de "
                                      f"{f.nombre_cliente}.", 6000)
@@ -645,13 +612,20 @@ class VentanaSimple(QMainWindow):
     # ------------------------------------------------------------------
     # Facturas
     def agregar(self, rutas: list[str] | None = None) -> None:
+        if not rutas:
+            rutas, _ = QFileDialog.getOpenFileNames(
+                self, "Facturas de venta o plantillas CLI, OPR y TRA", str(Path.home()),
+                "Facturas y plantillas (*.xml *.pdf *.zip *.txt *.xlsx);;Todos (*)")
+        if not rutas:
+            return
+        plantillas = [r for r in rutas if r.lower().endswith(".xlsx")]
+        if plantillas:
+            self.importar_plantillas(plantillas)
+            rutas = [r for r in rutas if not r.lower().endswith(".xlsx")]
+            if not rutas:
+                return
         if self.empresa is None:
             QMessageBox.information(self, "Facturas", "Primero elija o agregue una empresa con «Empresas…».")
-            return
-        if not rutas:
-            rutas, _ = QFileDialog.getOpenFileNames(self, "Facturas de venta", str(Path.home()),
-                                                    "Facturas (*.xml *.pdf *.zip *.txt);;Todos (*)")
-        if not rutas:
             return
         leidos = facturas.leer_rutas(rutas)
         propias = [f for f in leidos if isinstance(f, facturas.Factura) and f.tipo == "01" and f.fecha
@@ -667,26 +641,108 @@ class VentanaSimple(QMainWindow):
                 self.c_mes.setCurrentIndex(mes - 1)
         base = Reporte(self.empresa.codigo, self.anio, self.mes)
         propuestas = imf.analizar(leidos, self.empresa, base, self._opciones())
-        ya = {f.clave_acceso or f.numero for f in self.lista}
+        ya = {f.clave_acceso or f"{f.id_cliente}|{f.numero}" for f in self.lista}
         agregadas, omitidas = 0, []
         for p in propuestas:
             if p.estado == imf.OMITIR or p.factura is None:
                 omitidas.append(f"• {p.archivo}: {p.texto}")
                 continue
-            clave = p.factura.clave_acceso or p.factura.numero
+            clave = p.factura.clave_acceso or f"{p.factura.id_cliente}|{p.factura.numero}"
             if clave in ya:
                 omitidas.append(f"• {p.archivo}: ya está en la lista")
                 continue
             ya.add(clave)
             self.lista.append(p.factura)
             agregadas += 1
-        self._guardar_lista()
         self._mostrar_lista()
         if omitidas:
             texto = f"Se agregaron {agregadas} factura(s).\n\nNo se agregaron {len(omitidas)}:\n" + "\n".join(omitidas[:25])
             if len(omitidas) > 25:
                 texto += f"\n… y {len(omitidas) - 25} más."
             QMessageBox.information(self, "Facturas", texto)
+
+    # ------------------------------------------------------------------
+    # Plantillas CLI, OPR y TRA
+    def importar_plantillas(self, rutas: list[str]) -> bool:
+        """Lee las plantillas, las revisa con las reglas del manual y, si están bien, las carga en la tabla."""
+        rutas_p = [Path(r) for r in rutas]
+        # empresa: la del código de las plantillas (se elige sola)
+        try:
+            cabecera, _datos = excel._leer(rutas_p[0])
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "Plantillas", f"No se pudo leer {rutas_p[0].name}:\n{ex}")
+            return False
+        codigo = cabecera[1] if len(cabecera) > 1 else ""
+        dueña = next((e for e in emp.listar() if e.tiene_uafi and e.codigo == codigo), None)
+        if dueña is None:
+            QMessageBox.warning(self, "Plantillas", f"Las plantillas son del código de registro {codigo or '(vacío)'} "
+                                                    "y no hay ninguna empresa con ese código.\n"
+                                                    "Agréguela con «Empresas…».")
+            return False
+        if self.empresa is None or self.empresa.id != dueña.id:
+            self.c_empresa.setCurrentIndex(max(self.c_empresa.findData(dueña.id), 0))
+        e = self.empresa
+        try:
+            nuevo, avisos = excel.importar(rutas_p, e.estructura, e.catalogos)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.warning(self, "Plantillas", f"No se pudieron leer las plantillas:\n{ex}")
+            return False
+        prefijos = {n.prefijo for n in e.estructura.niveles}
+        leidos = set()
+        for r in rutas_p:
+            try:
+                cab, _d = excel._leer(r)
+                leidos.add((cab[0] if cab else "").upper())
+            except Exception:  # noqa: BLE001
+                pass
+        faltan = sorted(prefijos - leidos)
+        mensajes = validar(nuevo, e.estructura, e.catalogos)
+        errores = [m for m in mensajes if m.es_error]
+        problemas = [f"• Falta la plantilla {p}" for p in faltan] + [f"• {a}" for a in avisos]
+        for m in errores:
+            cli = nuevo.registro(m.ruta[:1]) if m.ruta else None
+            ope = nuevo.registro(m.ruta[:2]) if len(m.ruta) >= 2 else None
+            donde = (f"Operación {ope.get('NCT')} ({cli.get('NRS')})" if ope is not None else
+                     f"Cliente {cli.get('NRS')}" if cli is not None else "Reporte")
+            problemas.append(f"• {donde}: {m.texto}")
+        operaciones = sum(len(c.hijos) for c in nuevo.clientes)
+        transacciones = sum(len(o.hijos) for c in nuevo.clientes for o in c.hijos)
+        resumen = (f"<b>{e.nombre} — {MESES[nuevo.mes - 1]} {nuevo.anio}</b><br>"
+                   f"Clientes: {len(nuevo.clientes)} · Operaciones: {operaciones} · Transacciones: {transacciones}")
+        self.ultima_revision = problemas
+        if problemas and not self._confirmar_problemas(resumen, problemas):
+            return False
+        if self.lista and QMessageBox.question(
+                self, "Plantillas", "La tabla ya tiene facturas. ¿Reemplazarlas por las de las plantillas?") \
+                != QMessageBox.Yes:
+            return False
+        for control, valor in ((self.s_anio, nuevo.anio), (self.c_mes, nuevo.mes - 1)):
+            control.blockSignals(True)
+            control.setValue(valor) if control is self.s_anio else control.setCurrentIndex(valor)
+            control.blockSignals(False)
+        self._cargar_lista()
+        e.recordar_clientes([c.valores for c in nuevo.clientes])   # actividad, dirección, cantón… del CLI
+        self.lista = imf.facturas_desde_reporte(nuevo)
+        self._mostrar_lista()
+        if not problemas:
+            QMessageBox.information(self, "Plantillas", f"✔ Las plantillas están bien (sin errores).<br><br>{resumen}"
+                                    "<br><br>Se cargaron en la tabla.")
+        return True
+
+    def _confirmar_problemas(self, resumen: str, problemas: list[str]) -> bool:
+        """Muestra los problemas de las plantillas. True si el usuario quiere cargarlas igual."""
+        caja = QMessageBox(self)
+        caja.setIcon(QMessageBox.Warning)
+        caja.setWindowTitle("Revisión de las plantillas")
+        caja.setTextFormat(Qt.RichText)
+        caja.setText(f"{resumen}<br><br>Se encontraron <b>{len(problemas)} problema(s)</b> que la UAFE podría "
+                     "no aceptar:<br><br>" + "<br>".join(_html(x) for x in problemas[:20])
+                     + ("<br>…" if len(problemas) > 20 else ""))
+        cargar = caja.addButton("Cargar igual para corregir", QMessageBox.AcceptRole)
+        cancelar = caja.addButton("No cargar", QMessageBox.RejectRole)
+        caja.setDefaultButton(cancelar)
+        caja.exec()
+        return caja.clickedButton() is cargar
 
     def _ruc_elegido(self) -> str:
         fila = self.tabla.currentRow()
@@ -791,14 +847,12 @@ class VentanaSimple(QMainWindow):
         filas = sorted({i.row() for i in self.tabla.selectedIndexes()}, reverse=True)
         for fila in filas:
             del self.lista[fila]
-        self._guardar_lista()
         self._mostrar_lista()
 
     def vaciar(self) -> None:
         if self.lista and QMessageBox.question(self, "Quitar todas", "¿Quitar todas las facturas de este mes?") \
                 == QMessageBox.Yes:
             self.lista = []
-            self._guardar_lista()
             self._mostrar_lista()
 
     # ------------------------------------------------------------------
