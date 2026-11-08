@@ -125,12 +125,6 @@ class Validador:
             vistos[n].add(clave)
         return self.mensajes
 
-    def validar_registro(self, rep: Reporte, ruta: Ruta, nivel: Archivo, v: dict[str, str]) -> list[Mensaje]:
-        """Revisa un solo registro (para mostrar los errores mientras se edita)."""
-        self.mensajes = []
-        self._validar_registro(rep, ruta, nivel, v)
-        return self.mensajes
-
     def _validar_registro(self, rep: Reporte, ruta: Ruta, nivel: Archivo, v: dict[str, str]) -> None:
         for campo in nivel.propios:
             self._validar_campo(rep, ruta, nivel, campo, v.get(campo.nombre, ""), v)

@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from .empresas import Empresa
 from .facturas import Factura, NoLeido
-from .modelo import INSTRUMENTOS, Registro, Reporte, sin_tildes
+from .modelo import INSTRUMENTOS, PROVINCIAS, Registro, Reporte, sin_tildes
 from .reglas import INSTRUMENTOS_POR_TRANSACCION
 
 LISTA, AVISO, OMITIR = "lista", "aviso", "omitir"
@@ -175,16 +175,27 @@ def valores_factura(f: Factura, opciones: Opciones, anteriores: dict[str, dict[s
 
 
 def canton_por_direccion(direccion: str, cantones: dict[str, str]) -> str:
-    """Busca el nombre de un cantón dentro de la dirección ('PICHINCHA / QUITO / …' -> 1701)."""
-    texto = " " + re.sub(r"[^A-Z0-9]+", " ", sin_tildes(direccion.upper())) + " "
-    mejor, largo = "", 0
-    for codigo, nombre in cantones.items():
-        n = re.sub(r"[^A-Z0-9]+", " ", sin_tildes(nombre.upper())).strip()
-        if codigo == "0000" or len(n) < 4:
-            continue
-        if f" {n} " in texto and len(n) > largo:
-            mejor, largo = codigo, len(n)
-    return mejor
+    """Busca el nombre de un cantón dentro de la dirección ('PICHINCHA / QUITO / …' -> 1701).
+
+    Una calle puede llamarse como un cantón: si coinciden varios, vale el que además tenga su provincia en la
+    dirección; si sigue la duda, devuelve "" (mejor el valor por defecto, en gris, que un cantón inventado)."""
+    def plano(t: str) -> str:
+        return re.sub(r"[^A-Z0-9]+", " ", sin_tildes(t.upper())).strip()
+
+    texto = f" {plano(direccion)} "
+    hallados = {codigo: n for codigo, n in ((c, plano(v)) for c, v in cantones.items())
+                if codigo != "0000" and len(n) >= 4 and f" {n} " in texto}
+    # «SAN MIGUEL DE LOS BANCOS» no cuenta también como «SAN MIGUEL»
+    hallados = {c: n for c, n in hallados.items()
+                if not any(n != m and f" {n} " in f" {m} " for m in hallados.values())}
+    if len(hallados) > 1:
+        def con_provincia(codigo: str, nombre: str) -> bool:
+            provincia = plano(PROVINCIAS.get(codigo[:2], ""))
+            veces = len(re.findall(rf"(?= {provincia} )", texto)) if provincia else 0
+            return veces > (provincia == nombre)     # «LOJA»: el cantón no sirve de prueba de su propia provincia
+
+        hallados = {c: n for c, n in hallados.items() if con_provincia(c, n)}
+    return next(iter(hallados)) if len(hallados) == 1 else ""
 
 
 def _datos_cliente(f: Factura, empresa: Empresa, rep: Reporte) -> tuple[dict[str, str], list[str]]:
@@ -290,6 +301,16 @@ def revisar(p: Propuesta, opciones: Opciones) -> None:
     p.estado = AVISO if any(o.startswith(("Falta", "Cliente nuevo", "El tipo")) for o in p.observaciones) else LISTA
 
 
+def _proporcional(montos: dict[str, int], total: int) -> dict[str, int]:
+    """Reparte `total` en la misma proporción (enteros, nunca negativos); lo que sobra va al mayor."""
+    suma = sum(montos.values())
+    if not suma:
+        return montos
+    nuevos = {k: v * total // suma for k, v in montos.items()}
+    nuevos[max(nuevos, key=nuevos.get)] += total - sum(nuevos.values())
+    return nuevos
+
+
 def instrumentos(p: Propuesta, opciones: Opciones) -> dict[str, int]:
     """Valor entero en cada instrumento monetario; la suma es igual al total truncado de la factura."""
     f = p.factura
@@ -302,10 +323,7 @@ def instrumentos(p: Propuesta, opciones: Opciones) -> dict[str, int]:
     for codigo, valor in pagos:
         destino = INSTRUMENTO_POR_FORMA.get(codigo, opciones.instrumento_20)
         valores[destino] += int(valor)
-    diferencia = total - sum(valores.values())
-    mayor = max(valores, key=valores.get)
-    valores[mayor] += diferencia
-    return valores
+    return _proporcional(valores, total)       # cuadra los centavos truncados y un total editado a mano
 
 
 def aplicar(rep: Reporte, propuestas: list[Propuesta], empresa: Empresa, opciones: Opciones,
@@ -419,7 +437,8 @@ def facturas_desde_reporte(rep: Reporte) -> list[Factura]:
                 f.fecha = dt.date(int(fecha[:4]), int(fecha[4:6]), int(fecha[6:8]))
             except (ValueError, IndexError):
                 f.fecha = None
-            f.total = Decimal(op.get("VTO") or "0")
+            vto = op.get("VTO")
+            f.total = Decimal(vto if vto.isdigit() else "0")
             f.resu = {"ttb": op.get("TTB"), "adb": op.get("ADB"), "cco": op.get("CCO")}
             ttrs = {t.get("TTR") for t in op.hijos}
             if len(ttrs) == 1:
@@ -451,7 +470,12 @@ def operacion_desde_original(p: Propuesta) -> Registro:
         tr = Registro(dict(t))
         if p.ttr and p.ttr != antes.get("ttr"):
             tr.valores["TTR"] = p.ttr
-        if len(orig["trs"]) == 1:
+        if len(orig["trs"]) == 1 and not _instrumento_unico(tr) and not p.instrumento_fijo:
+            if total_cambiado:                        # pago repartido: se conserva la proporción
+                montos = {n: int(tr.get(n)) if tr.get(n).isdigit() else 0 for n in INSTRUMENTOS}
+                tr.valores.update({k: str(v) for k, v in _proporcional(montos, int(total)).items()})
+                tr.valores["VVT"] = total
+        elif len(orig["trs"]) == 1:
             inst = p.instrumento if p.instrumento and p.instrumento != antes.get("inst") else \
                 (_instrumento_unico(tr) or p.instrumento)
             if total_cambiado or inst != _instrumento_unico(tr):
@@ -463,25 +487,3 @@ def operacion_desde_original(p: Propuesta) -> Registro:
                 tr.valores["VVT"] = valor
         op.hijos.append(tr)
     return op
-
-
-def factura_a_dict(f: Factura) -> dict:
-    return {"archivo": f.archivo, "tipo": f.tipo, "origen": f.origen, "ruc_emisor": f.ruc_emisor,
-            "tipo_id_cliente": f.tipo_id_cliente, "id_cliente": f.id_cliente, "nombre_cliente": f.nombre_cliente,
-            "direccion_cliente": f.direccion_cliente, "estab": f.estab, "pto_emi": f.pto_emi,
-            "secuencial": f.secuencial, "fecha": f.fecha.isoformat() if f.fecha else "",
-            "clave_acceso": f.clave_acceso, "total": str(f.total), "pagos": [[c, str(v)] for c, v in f.pagos],
-            "resu": {k: v for k, v in (f.resu or {}).items() if v}}
-
-
-def factura_de_dict(d: dict) -> Factura:
-    import datetime as dt
-
-    f = Factura(**{k: d.get(k, "") for k in ("archivo", "tipo", "origen", "ruc_emisor", "tipo_id_cliente",
-                                              "id_cliente", "nombre_cliente", "direccion_cliente", "estab",
-                                              "pto_emi", "secuencial", "clave_acceso")})
-    f.fecha = dt.date.fromisoformat(d["fecha"]) if d.get("fecha") else None
-    f.total = Decimal(d.get("total") or "0")
-    f.pagos = [(c, Decimal(v)) for c, v in d.get("pagos", [])]
-    f.resu = {k: v for k, v in (d.get("resu") or {}).items() if k in CAMPOS_FACTURA and v}
-    return f

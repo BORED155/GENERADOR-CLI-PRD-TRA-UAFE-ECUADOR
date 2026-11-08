@@ -79,6 +79,27 @@ def crear_uafi_falso(carpeta: Path) -> Path:
     return carpeta
 
 
+@pytest.fixture(autouse=True)
+def responder_preguntas(monkeypatch):
+    """Las preguntas de la ventana no esperan un clic en las pruebas: se responden «Sí»."""
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+
+
+@pytest.fixture(autouse=True)
+def sin_internet(monkeypatch):
+    """Las pruebas nunca salen a internet ni dejan hilos corriendo: el trabajo del SRI se hace en el mismo hilo."""
+    from resuapp import sri
+    from resuapp.ui.simple import VentanaSimple
+
+    def sin_red(_ruta):
+        raise sri.SinConexion("prueba")
+
+    monkeypatch.setattr(sri, "_get", sin_red)
+    monkeypatch.setattr(VentanaSimple, "_lanzar_sri", lambda self, e, lista: self._trabajo_sri(e, lista))
+
+
 @pytest.fixture
 def datos(tmp_path, monkeypatch):
     monkeypatch.setenv("RESUAPP_DATOS", str(tmp_path / "datos"))

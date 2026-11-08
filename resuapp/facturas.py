@@ -92,8 +92,14 @@ def _desde_clave(f: Factura, clave: str) -> None:
 
 
 def _dec(texto: str) -> Decimal:
+    """«1234.56», «1,234.56», «1.234,56» o «1234,56» -> 1234.56."""
+    t = texto.strip()
+    if "," in t and t.rfind(",") > t.rfind(".") and not re.fullmatch(r"\d{1,3}(,\d{3})+", t):
+        t = t.replace(".", "").replace(",", ".")
+    else:
+        t = t.replace(",", "")
     try:
-        return Decimal(texto.replace(",", "")) if texto else Decimal(0)
+        return Decimal(t) if t else Decimal(0)
     except InvalidOperation:
         return Decimal(0)
 
@@ -154,7 +160,9 @@ def _leer_zip(ruta: Path) -> list[Factura | NoLeido]:
             try:
                 datos = z.read(info)
                 salida.append(leer_pdf(datos, nombre) if nombre.lower().endswith(".pdf") else leer_xml(datos, nombre))
-            except ErrorFactura as e:
+            except RuntimeError:                  # zipfile lo lanza si pide contraseña
+                salida.append(NoLeido(nombre, "El ZIP está protegido con contraseña"))
+            except (ErrorFactura, zipfile.BadZipFile) as e:
                 salida.append(NoLeido(nombre, str(e)))
     return salida
 
@@ -231,13 +239,12 @@ def leer_xml(datos: bytes, nombre: str = "") -> Factura:
 
 
 # --- PDF (RIDE) --------------------------------------------------------
-_NUM = r"([\d,]*\d\.\d{2})"
+_NUM = r"(\d[\d.,]*[.,]\d{2})(?!\d)"
 
 
 def leer_pdf(datos: bytes, nombre: str = "") -> Factura:
     try:
         from pypdf import PdfReader
-        from pypdf.errors import PdfReadError
     except ImportError:  # pragma: no cover
         raise ErrorFactura("Falta la librería pypdf para leer PDF") from None
     try:
@@ -245,7 +252,9 @@ def leer_pdf(datos: bytes, nombre: str = "") -> Factura:
         if lector.is_encrypted:
             raise ErrorFactura("El PDF está protegido con contraseña")
         texto = "\n".join(p.extract_text(extraction_mode="layout") or "" for p in lector.pages[:10])
-    except (PdfReadError, ValueError, KeyError, OSError) as e:
+    except ErrorFactura:
+        raise
+    except Exception as e:  # noqa: BLE001 - un PDF dañado no debe perder las demás facturas del lote
         raise ErrorFactura(f"No se pudo leer el PDF: {e}") from None
     return factura_desde_texto_ride(texto, nombre)
 

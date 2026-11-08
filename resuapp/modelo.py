@@ -17,6 +17,13 @@ from .estructura import Archivo, Campo, Estructura
 AUTOMATICOS = {"CDR", "FCT"}
 # Instrumentos monetarios de la transacción (sector inmobiliario y constructor).
 INSTRUMENTOS = ["VDE", "VCR", "VEF", "VCH", "VBB", "VSR", "VTC", "VFC", "VCV"]
+PROVINCIAS = {
+    "01": "AZUAY", "02": "BOLÍVAR", "03": "CAÑAR", "04": "CARCHI", "05": "COTOPAXI", "06": "CHIMBORAZO",
+    "07": "EL ORO", "08": "ESMERALDAS", "09": "GUAYAS", "10": "IMBABURA", "11": "LOJA", "12": "LOS RÍOS",
+    "13": "MANABÍ", "14": "MORONA SANTIAGO", "15": "NAPO", "16": "PASTAZA", "17": "PICHINCHA",
+    "18": "TUNGURAHUA", "19": "ZAMORA CHINCHIPE", "20": "GALÁPAGOS", "21": "SUCUMBÍOS", "22": "ORELLANA",
+    "23": "SANTO DOMINGO DE LOS TSÁCHILAS", "24": "SANTA ELENA", "90": "ZONAS NO DELIMITADAS",
+}
 
 
 def periodo(anio: int, mes: int) -> str:
@@ -119,12 +126,6 @@ class Reporte:
             lista = reg.hijos
         return reg
 
-    def lista_de(self, ruta_padre: Ruta) -> list[Registro]:
-        if not ruta_padre:
-            return self.clientes
-        padre = self.registro(ruta_padre)
-        return padre.hijos if padre else []
-
     def valores_completos(self, nivel: Archivo, reg: Registro, ancestros: list[Registro]) -> dict[str, str]:
         """Valores de todos los campos del nivel, con las FK heredadas y los automáticos."""
         heredados: dict[str, str] = {}
@@ -183,16 +184,3 @@ class Reporte:
 
     def nombre_archivo(self) -> str:
         return f"RESU{self.codigo}{self.periodo}.json"
-
-
-def calcular_total(estructura: Estructura, nivel: Archivo, valores: dict[str, str]) -> None:
-    """En el sector inmobiliario el valor total (VVT) es la suma de los instrumentos monetarios."""
-    if not estructura.es_inmobiliaria or nivel.campo("VVT") is None:
-        return
-    total = 0
-    for nombre in INSTRUMENTOS:
-        try:
-            total += int(valores.get(nombre) or 0)
-        except ValueError:
-            pass
-    valores["VVT"] = str(total)

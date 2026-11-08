@@ -15,6 +15,16 @@ def ejecutar(argv: list[str]) -> int:
     app.setOrganizationName("resuapp")
     app.setApplicationName("Generador RESU UAFE")
     app.setApplicationDisplayName("Generador RESU UAFE")
+    import traceback
+
+    from PySide6.QtWidgets import QMessageBox
+
+    def avisar_error(tipo, valor, rastro):
+        traceback.print_exception(tipo, valor, rastro)
+        QMessageBox.warning(None, "Generador RESU UAFE: algo falló",
+                            f"{valor}\n\n" + "".join(traceback.format_exception(tipo, valor, rastro))[-1500:])
+    sys.excepthook = avisar_error               # sin esto, un error en la ventana no muestra nada
+
     from .simple import VentanaSimple
 
     ventana = VentanaSimple()

@@ -4,22 +4,21 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-import json
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelectionModel, QObject, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QPainter
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QGridLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
                                QStyledItemDelegate,
                                QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import empresas as emp
-from .. import excel, facturas, importar_facturas as imf, uafi
-from ..modelo import Reporte, entero, periodo
+from .. import excel, facturas, importar_facturas as imf, sri, uafi
+from ..modelo import PROVINCIAS, Reporte, entero, periodo
 from ..reglas import validar
 from ..rutas import carpeta_documentos
-from .campos import PROVINCIAS, ControlBuscador
+from .campos import ControlBuscador
 from .empresas import DialogoEmpresas
 
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
@@ -80,9 +79,14 @@ se ajusta solo (por ejemplo, 19 tarjeta de crédito → tarjeta de crédito).</p
 <span style="color:#888"><i>gris</i></span> = valor automático (lo último usado) ·
 <span style="color:#1f4e9c">azul</span> = como en un mes anterior de ese cliente ·
 negro = elegido para esa factura o según su forma de pago ·
+<span style="background:#ffe08a">ámbar</span> = actividad tomada del SRI que conviene revisar ·
 <span style="background:#f8d7da">rojo</span> = ese tipo de transacción no admite ese pago (corríjalo).</p>
 <p>La <b>actividad económica</b> es del cliente: una sola por cliente, vale para todas sus facturas.
-Para verla, elija una factura y pulse <b>«Consultar RUC en el SRI»</b> (copia el RUC; péguelo con Ctrl+V).</p>
+Si el cliente no la tiene, el programa <b>consulta su RUC en el SRI</b> (necesita internet) y asigna el código
+más parecido del catálogo, junto con su cantón. Si la coincidencia no es segura, queda
+<span style="background:#ffe08a">en ámbar</span>: el mouse muestra lo que dice el SRI y otras opciones; corríjala con la
+flechita o confírmela con clic derecho. Lo que usted ya puso nunca se cambia.
+También puede verla con <b>«Consultar RUC en el SRI»</b> (copia el RUC; péguelo con Ctrl+V).</p>
 
 <h3>4. Valide</h3>
 <p>Pulse <b style="color:#ef6c00">✔ Validar</b>: revisa todo con las reglas del manual de la UAFE sin generar nada.
@@ -97,7 +101,7 @@ podría no ser aceptado por la UAFE, se avisa antes.</li>
 <li>Pulse <b style="color:#c62828">Abrir UAFI de la empresa</b>: escriba el usuario, elija el mes,
 cargue CLI, OPR y TRA, pulse <b>Validar</b> y luego <b>Guardar</b>.</li>
 </ol>
-<p><i>En Linux el UAFI guarda el .uaf con un nombre de Windows (por ejemplo «mi carpeta\RESU….uaf», fuera de
+<p><i>En Linux el UAFI guarda el .uaf con un nombre de Windows (por ejemplo «mi carpeta\\RESU….uaf», fuera de
 la carpeta elegida). Si lo abrió con el botón rojo, el programa lo corrige solo y le avisa dónde quedó.</i></p>
 
 <h3>Datos de la empresa</h3>
@@ -317,6 +321,11 @@ class _SenalUaf(QObject):
     listo = Signal(object, bool, object)
 
 
+class _SenalSri(QObject):
+    resultado = Signal(object, object, object, int, int)   # empresa, factura, contribuyente, hecho, total
+    fin = Signal(object, bool)                             # identificaciones que quedaron sin consultar, hubo fallo
+
+
 class TablaFacturas(QTableWidget):
     def __init__(self):
         super().__init__(0, len(COLUMNAS))
@@ -347,6 +356,14 @@ class VentanaSimple(QMainWindow):
         self.empresa: emp.Empresa | None = None
         self.lista: list[facturas.Factura] = []
         self._cargando = False
+        self._sin_generar = False      # la tabla tiene cambios que no llegaron a un Excel
+        self._avisados: set[str] = set()   # archivos dañados ya avisados en esta sesión
+        self._sri_pedidos: set[tuple[str, str]] = set()    # (empresa, cliente) ya consultados en esta sesión
+        self._sri_comparadores: dict[str, sri.Comparador] = {}
+        self._sri_por_dibujar = False
+        self._senal_sri = _SenalSri()
+        self._senal_sri.resultado.connect(self._sri_resultado)
+        self._senal_sri.fin.connect(self._sri_fin)
         self._marcas: dict[tuple[str, str], list[str]] = {}   # (cliente, factura) -> problemas al validar
         self._senal_uaf = _SenalUaf()
         self._senal_uaf.listo.connect(self._uaf_revisado)
@@ -467,9 +484,9 @@ class VentanaSimple(QMainWindow):
         lay.addLayout(abajo)
         self.setCentralWidget(central)
 
-        self.c_empresa.currentIndexChanged.connect(self._empresa_elegida)
-        self.c_mes.currentIndexChanged.connect(lambda _i: self._cargar_lista())
-        self.s_anio.valueChanged.connect(lambda _v: self._cargar_lista())
+        self.c_empresa.currentIndexChanged.connect(lambda _i: self._al_cambiar(self._empresa_elegida))
+        self.c_mes.currentIndexChanged.connect(lambda _i: self._al_cambiar(self._cargar_lista))
+        self.s_anio.valueChanged.connect(lambda _v: self._al_cambiar(self._cargar_lista))
         cfg = QSettings()
         self.restoreGeometry(cfg.value("simple/geometria", b""))
         if not cfg.value("simple/geometria"):
@@ -504,12 +521,35 @@ class VentanaSimple(QMainWindow):
         return self.c_mes.currentIndex() + 1
 
     def _cargar_lista(self) -> None:
-        from ..modelo import periodo as _periodo
-
-        self.anteriores = imf.ultimos_por_cliente(self.previos, antes_de=_periodo(self.anio, self.mes)) \
+        self.anteriores = imf.ultimos_por_cliente(self.previos, antes_de=periodo(self.anio, self.mes)) \
             if self.empresa else {}
         self.lista = []   # siempre desde cero: se agregan las facturas que se necesiten del mes
+        self._seleccion = (self.empresa.id if self.empresa else None, self.c_mes.currentIndex(), self.anio)
         self._mostrar_lista()
+
+    def _puede_descartar(self) -> bool:
+        """La tabla no se guarda: antes de vaciarla, pregunta si tiene cambios que no llegaron a un Excel."""
+        return not (self.lista and self._sin_generar) or QMessageBox.question(
+            self, "Facturas sin generar", f"La tabla tiene {len(self.lista)} factura(s) que todavía no se generaron "
+            "y se van a perder. ¿Continuar?") == QMessageBox.Yes
+
+    def _al_cambiar(self, accion) -> None:
+        """Empresa, mes o año cambiados a mano: si el usuario no quiere perder la tabla, se vuelve a lo anterior."""
+        if self._puede_descartar():
+            accion()
+            return
+        ident, mes, anio = self._seleccion
+        self._fijar_seleccion(self.c_empresa.findData(ident), mes, anio)
+
+    def _fijar_seleccion(self, indice_empresa: int, mes: int, anio: int) -> None:
+        """Cambia los controles sin disparar sus avisos."""
+        for control in (self.c_empresa, self.c_mes, self.s_anio):
+            control.blockSignals(True)
+        self.c_empresa.setCurrentIndex(max(indice_empresa, 0))
+        self.c_mes.setCurrentIndex(mes)
+        self.s_anio.setValue(anio)
+        for control in (self.c_empresa, self.c_mes, self.s_anio):
+            control.blockSignals(False)
 
     def _canton_cliente(self, f: facturas.Factura, directorio: dict) -> str:
         datos = directorio.get(f.id_cliente, {})
@@ -554,9 +594,11 @@ class VentanaSimple(QMainWindow):
 
         if not conservar_marcas:
             self._marcas = {}
+            self._sin_generar = True
 
         self.lista.sort(key=lambda f: (f.fecha or dt.date.min, f.numero))
         directorio = self.empresa.directorio_clientes() if self.empresa else {}
+        consultas = self.empresa.consultas_sri() if self.empresa else {}
         cat = self.empresa.catalogos if self.empresa else None
         opciones = self._opciones()
         cursiva = self.tabla.font()
@@ -605,10 +647,10 @@ class VentanaSimple(QMainWindow):
                 if col == C_AEC:
                     item.setData(Qt.UserRole, aec)
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
-                if col == C_TOTAL:
-                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 if col == C_AEC and not aec:
                     item.setForeground(QColor("#888888"))
+                if col == C_AEC and consultas.get(f.id_cliente, {}).get("codigo") == aec and aec:
+                    self._marcar_sri(item, consultas[f.id_cliente], aec)
                 self.tabla.setItem(fila, col, item)
             for col, campo in CAMPO_COLUMNA.items():
                 valor, origen = v[campo]
@@ -658,6 +700,17 @@ class VentanaSimple(QMainWindow):
         self.b_uafi.setEnabled(hay)
         nombre = f" — {self.empresa.nombre} — {MESES[self.mes - 1]} {self.anio}" if hay else ""
         self.setWindowTitle("Generador RESU UAFE" + nombre)
+
+    def _marcar_sri(self, item: QTableWidgetItem, registro: dict, codigo: str) -> None:
+        """Ayuda de la celda con lo que dijo el SRI; en ámbar si la coincidencia no es segura."""
+        cat = self.empresa.catalogos
+        ayuda = f"{item.text()}\nSegún el SRI: {registro.get('texto', '')}\n"
+        if sri.es_dudosa(registro, codigo):
+            item.setBackground(QColor("#ffe08a"))
+            ayuda += "Coincidencia dudosa: revísela.\n"
+            otras = "\n".join(f"• {c} — {cat.nombre('AE', c)}" for c in registro.get("otras", []))
+            ayuda += f"Otras opciones:\n{otras}\n" if otras else ""
+        item.setToolTip(ayuda + "Flechita: elegir de la lista · Clic derecho: confirmar o buscar")
 
     def _filas_objetivo(self, fila: int) -> list[int]:
         """La fila editada y, si está entre las seleccionadas, todas las seleccionadas."""
@@ -749,6 +802,12 @@ class VentanaSimple(QMainWindow):
             except (OSError, ValueError, KeyError):
                 pass
         self.opciones_base = imf.opciones_sugeridas(e, self.previos)
+        e.directorio_clientes(), e.valores_recordados()     # apartan el archivo si está dañado
+        for nombre in e.archivos_danados():
+            if f"{e.id}/{nombre}" not in self._avisados:
+                self._avisados.add(f"{e.id}/{nombre}")
+                QMessageBox.warning(self, "Archivo dañado", f"«{nombre}» de {e.nombre} no se pudo leer y se apartó para "
+                                    "no perderlo. El programa volverá a aprender esos datos.")
 
     def _opciones(self) -> imf.Opciones:
         return imf.Opciones(**self.opciones_base.a_dict())
@@ -779,10 +838,8 @@ class VentanaSimple(QMainWindow):
             anio, mes = next(iter(meses))
             if not self.lista or QMessageBox.question(
                     self, "Mes", f"Las facturas son de {MESES[mes - 1]} {anio}. ¿Cambiar a ese mes?") == QMessageBox.Yes:
-                self.s_anio.blockSignals(True)
-                self.s_anio.setValue(anio)
-                self.s_anio.blockSignals(False)
-                self.c_mes.setCurrentIndex(mes - 1)
+                self._fijar_seleccion(self.c_empresa.currentIndex(), mes - 1, anio)
+                self._cargar_lista()        # también si solo cambió el año
         base = Reporte(self.empresa.codigo, self.anio, self.mes)
         propuestas = imf.analizar(leidos, self.empresa, base, self._opciones())
         ya = {f.clave_acceso or f"{f.id_cliente}|{f.numero}" for f in self.lista}
@@ -799,11 +856,75 @@ class VentanaSimple(QMainWindow):
             self.lista.append(p.factura)
             agregadas += 1
         self._mostrar_lista()
+        self._consultar_sri()
         if omitidas:
             texto = f"Se agregaron {agregadas} factura(s).\n\nNo se agregaron {len(omitidas)}:\n" + "\n".join(omitidas[:25])
             if len(omitidas) > 25:
                 texto += f"\n… y {len(omitidas) - 25} más."
             QMessageBox.information(self, "Facturas", texto)
+
+    # ------------------------------------------------------------------
+    # Actividad económica y cantón desde el SRI (en segundo plano, para no congelar la ventana)
+    def _consultar_sri(self) -> None:
+        e = self.empresa
+        if e is None:
+            return
+        directorio, hechas = e.directorio_clientes(), e.consultas_sri()
+        pendientes: dict[str, facturas.Factura] = {}
+        for f in self.lista:
+            datos = directorio.get(f.id_cliente, {})
+            if (not datos.get("AEC") or not datos.get("CCC")) and f.id_cliente not in hechas \
+                    and (e.id, f.id_cliente) not in self._sri_pedidos and sri.ruc_de(f.id_cliente):
+                pendientes[f.id_cliente] = f
+        if pendientes:
+            self._sri_pedidos |= {(e.id, i) for i in pendientes}
+            self.statusBar().showMessage(f"Consultando {len(pendientes)} cliente(s) en el SRI…")
+            self._lanzar_sri(e, list(pendientes.values()))
+
+    def _lanzar_sri(self, e: emp.Empresa, lista: list[facturas.Factura]) -> None:
+        import threading
+
+        threading.Thread(target=self._trabajo_sri, args=(e, lista), daemon=True).start()
+
+    def _trabajo_sri(self, e: emp.Empresa, lista: list[facturas.Factura]) -> None:
+        """Solo consulta (en otro hilo); guardar y dibujar se hace en la ventana, al recibir la señal."""
+        import time
+
+        for hecho, f in enumerate(lista, start=1):
+            try:
+                c = sri.consultar(f.id_cliente)
+            except sri.SinConexion:
+                self._senal_sri.fin.emit({(e.id, x.id_cliente) for x in lista[hecho - 1:]}, True)
+                return
+            self._senal_sri.resultado.emit(e, f, c, hecho, len(lista))
+            time.sleep(0.2)                              # sin apurar al servicio del SRI
+        self._senal_sri.fin.emit(set(), False)
+
+    def _sri_resultado(self, e: emp.Empresa, f: facturas.Factura, c, hecho: int, total: int) -> None:
+        if c is not None:
+            comparador = self._sri_comparadores.setdefault(e.id, sri.Comparador(e.catalogos.tabla("AE")))
+            sri.aplicar(e, f.id_cliente, f.nombre_cliente, f.tipo_id_cliente, c, comparador)
+        self.statusBar().showMessage(f"Consultando en el SRI: {hecho} de {total}…")
+        self._sri_por_dibujar = True
+        self._sri_dibujar()
+
+    def _sri_fin(self, sin_consultar: set, fallo: bool) -> None:
+        self._sri_pedidos -= sin_consultar               # se reintenta la próxima vez que se agreguen facturas
+        self.statusBar().showMessage("No se pudo consultar el SRI (sin internet o servicio no disponible). Esos clientes "
+                                     "quedan con la actividad por defecto." if fallo else "Consulta en el SRI terminada.", 10000)
+        self._sri_dibujar()
+
+    def _sri_dibujar(self) -> None:
+        """Redibuja con lo nuevo, sin interrumpir si el usuario está escribiendo en una celda."""
+        from PySide6.QtCore import QTimer
+
+        if not self._sri_por_dibujar:
+            return
+        if self.tabla.state() == QAbstractItemView.EditingState:
+            QTimer.singleShot(800, self._sri_dibujar)
+            return
+        self._sri_por_dibujar = False
+        self._mostrar_lista(conservar_marcas=True)
 
     # ------------------------------------------------------------------
     # Plantillas CLI, OPR y TRA
@@ -817,15 +938,12 @@ class VentanaSimple(QMainWindow):
             QMessageBox.warning(self, "Plantillas", f"No se pudo leer {rutas_p[0].name}:\n{ex}")
             return False
         codigo = cabecera[1] if len(cabecera) > 1 else ""
-        dueña = next((e for e in emp.listar() if e.tiene_uafi and e.codigo == codigo), None)
-        if dueña is None:
+        e = next((x for x in emp.listar() if x.tiene_uafi and x.codigo == codigo), None)
+        if e is None:
             QMessageBox.warning(self, "Plantillas", f"Las plantillas son del código de registro {codigo or '(vacío)'} "
                                                     "y no hay ninguna empresa con ese código.\n"
                                                     "Agréguela con «Empresas…».")
             return False
-        if self.empresa is None or self.empresa.id != dueña.id:
-            self.c_empresa.setCurrentIndex(max(self.c_empresa.findData(dueña.id), 0))
-        e = self.empresa
         try:
             nuevo, avisos = excel.importar(rutas_p, e.estructura, e.catalogos)
         except Exception as ex:  # noqa: BLE001
@@ -860,11 +978,8 @@ class VentanaSimple(QMainWindow):
                 self, "Plantillas", "La tabla ya tiene facturas. ¿Reemplazarlas por las de las plantillas?") \
                 != QMessageBox.Yes:
             return False
-        for control, valor in ((self.s_anio, nuevo.anio), (self.c_mes, nuevo.mes - 1)):
-            control.blockSignals(True)
-            control.setValue(valor) if control is self.s_anio else control.setCurrentIndex(valor)
-            control.blockSignals(False)
-        self._cargar_lista()
+        self._fijar_seleccion(self.c_empresa.findData(e.id), nuevo.mes - 1, nuevo.anio)     # la empresa se elige sola
+        self._empresa_elegida()
         e.recordar_clientes([c.valores for c in nuevo.clientes])   # actividad, dirección, cantón… del CLI
         self.lista = imf.facturas_desde_reporte(nuevo)
         self._mostrar_lista()
@@ -918,6 +1033,9 @@ class VentanaSimple(QMainWindow):
         menu = QMenu(self)
         if col == C_AEC:
             self.tabla.selectRow(fila)
+            aec = self.empresa.directorio_clientes().get(f.id_cliente, {}).get("AEC", "")
+            if sri.es_dudosa(self.empresa.consultas_sri().get(f.id_cliente, {}), aec):
+                menu.addAction("Confirmar esta actividad (quitar el ámbar)", lambda: self.guardar_actividad(f, aec))
             menu.addAction("Asignar actividad económica…", lambda: self.asignar_actividad(f))
         elif col in CAMPO_COLUMNA:
             campo = CAMPO_COLUMNA[col]
@@ -972,6 +1090,9 @@ class VentanaSimple(QMainWindow):
             "TID": imf.TIPO_ID.get(f.tipo_id_cliente, "")}
         datos["AEC"] = codigo
         e.recordar_clientes([datos])
+        consulta = e.consultas_sri().get(f.id_cliente)
+        if consulta and "codigo" in consulta:          # ya la revisó el usuario: deja de marcarse
+            e.guardar_consulta_sri(f.id_cliente, {"texto": consulta.get("texto", "")})
         fila = self.tabla.currentRow()
         self._mostrar_lista()
         self.tabla.selectRow(fila)
@@ -1016,10 +1137,18 @@ class VentanaSimple(QMainWindow):
         Devuelve (reporte, errores, advertencias, afectadas) donde cada error/advertencia es un texto
         «• Factura … (cliente): problema» y afectadas = {(cliente, factura): [problemas]}."""
         e = self.empresa
-        rep, _props = imf.construir_reporte(e, self.anio, self.mes, lista if lista is not None else self.lista,
-                                            self._opciones(), self.anteriores)
+        rep, propuestas = imf.construir_reporte(e, self.anio, self.mes, lista if lista is not None else self.lista,
+                                                self._opciones(), self.anteriores)
         errores, advertencias = [], []
         afectadas: dict[tuple[str, str], list[str]] = {}
+        for p in propuestas:                 # lo que está en la tabla pero no entrará al reporte
+            if p.estado == imf.OMITIR and p.factura is not None:
+                errores.append(f"• Factura {p.factura.numero} ({p.factura.nombre_cliente}): no entra al reporte. {p.texto}")
+                afectadas.setdefault((p.factura.id_cliente, p.factura.numero), []).append(p.texto)
+        consultas = e.consultas_sri()
+        for c in rep.clientes:
+            if sri.es_dudosa(consultas.get(c.get("IDE"), {}), c.get("AEC")):
+                advertencias.append(f"• Cliente {c.get('NRS')}: actividad tomada del SRI con coincidencia dudosa; revísela.")
         for m in validar(rep, e.estructura, e.catalogos):
             cliente = rep.registro(m.ruta[:1]) if m.ruta else None
             operacion = rep.registro(m.ruta[:2]) if len(m.ruta) >= 2 else None
@@ -1079,14 +1208,13 @@ class VentanaSimple(QMainWindow):
             return
         opciones = self._opciones()
         rep, errores, _adv, afectadas = self._revisar()
-        mensajes, lineas = errores, errores
         con_problema = set(afectadas)   # (cliente, factura)
-        if mensajes:
+        if errores:
             caja = QMessageBox(self)
             caja.setIcon(QMessageBox.Warning)
             caja.setWindowTitle("Revisar")
-            caja.setText(f"Hay {len(mensajes)} dato(s) que la UAFE podría no aceptar:\n\n" + "\n".join(lineas[:15])
-                         + ("\n…" if len(lineas) > 15 else ""))
+            caja.setText(f"Hay {len(errores)} dato(s) que la UAFE podría no aceptar:\n\n" + "\n".join(errores[:15])
+                         + ("\n…" if len(errores) > 15 else ""))
             b_todas = caja.addButton("Generar con todas", QMessageBox.AcceptRole)
             b_sin = caja.addButton(f"Generar sin esas facturas ({len(con_problema)})", QMessageBox.ActionRole)
             b_cancelar = caja.addButton("Cancelar", QMessageBox.RejectRole)
@@ -1121,6 +1249,7 @@ class VentanaSimple(QMainWindow):
             QMessageBox.warning(self, "Generar", f"No se pudieron guardar:\n{ex}")
             return
         rep.guardar(e.carpeta_reportes / rep.nombre_archivo())
+        self._sin_generar = False
         cfg.setValue(f"exportar/{e.id}", str(destino.parent))
         t = rep.totales(e.estructura)
         caja = QMessageBox(self)
@@ -1223,7 +1352,12 @@ class VentanaSimple(QMainWindow):
 
     def administrar_empresas(self) -> None:
         DialogoEmpresas(self).exec()
-        self._llenar_empresas(self.c_empresa.currentData() or "")
+        actual, lista, sin_generar = self.c_empresa.currentData() or "", self.lista, self._sin_generar
+        self._llenar_empresas(actual)
+        if actual and self.c_empresa.currentData() == actual:     # corregir un dato no debe vaciar la tabla
+            self.lista, self._sin_generar = lista, sin_generar
+            self._mostrar_lista()
+            self._sin_generar = sin_generar
 
     # ------------------------------------------------------------------
     def dragEnterEvent(self, event):
@@ -1236,6 +1370,9 @@ class VentanaSimple(QMainWindow):
             self.agregar(rutas)
 
     def closeEvent(self, event):
+        if not self._puede_descartar():
+            event.ignore()
+            return
         cfg = QSettings()
         cfg.setValue("simple/geometria", self.saveGeometry())
         super().closeEvent(event)

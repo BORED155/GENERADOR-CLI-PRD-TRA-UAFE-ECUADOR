@@ -9,6 +9,7 @@ Formato de cada plantilla (igual a las que entrega el SISLAFT):
 from __future__ import annotations
 
 import datetime as dt
+import re
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -81,7 +82,6 @@ def _celdas_xml(filas: list[list], estilos: dict[str, str]) -> tuple[str, list[s
 
 def escribir_desde_plantilla(plantilla: Path, ruta: Path, filas: list[list]) -> None:
     """Copia la plantilla oficial y reemplaza solo las filas (y la tabla de textos)."""
-    import re
     import zipfile
 
     with zipfile.ZipFile(plantilla) as zi:
@@ -126,27 +126,15 @@ def _columna(i: int) -> str:
 
 
 def _xml(texto: str) -> str:
+    # un carácter de control (a veces vienen al leer un PDF) deja el archivo ilegible
+    texto = re.sub("[^\t\n\r\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]", "", texto)
     return (texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def escribir_xlsx(ruta: Path, filas: list[list], anchos: list[int] | None = None) -> None:
     import zipfile
 
-    cadenas: dict[str, int] = {}
-    total_cadenas = 0
-    lineas = []
-    for r, fila in enumerate(filas, start=1):
-        celdas = []
-        for c, valor in enumerate(fila):
-            ref = f"{_columna(c)}{r}"
-            if isinstance(valor, int):
-                celdas.append(f'<c r="{ref}"><v>{valor}</v></c>')
-            else:
-                texto = str(valor)
-                total_cadenas += 1
-                indice = cadenas.setdefault(texto, len(cadenas))
-                celdas.append(f'<c r="{ref}" t="s"><v>{indice}</v></c>')
-        lineas.append(f'<row r="{r}">{"".join(celdas)}</row>')
+    filas_xml, cadenas, total_cadenas = _celdas_xml(filas, {})
     ancho_max = max((len(f) for f in filas), default=1)
     cols = ""
     if anchos:
@@ -156,7 +144,7 @@ def escribir_xlsx(ruta: Path, filas: list[list], anchos: list[int] | None = None
     nsr = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
     hoja = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet {ns} {nsr}>'
             f'<dimension ref="A1:{_columna(ancho_max - 1)}{max(len(filas), 1)}"/>{cols}'
-            f'<sheetData>{"".join(lineas)}</sheetData></worksheet>')
+            f'<sheetData>{filas_xml}</sheetData></worksheet>')
     compartidas = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<sst {ns} count="{total_cadenas}" '
                    f'uniqueCount="{len(cadenas)}">'
                    + "".join(f'<si><t xml:space="preserve">{_xml(t)}</t></si>' for t in cadenas) + "</sst>")
@@ -213,8 +201,8 @@ def _texto(valor) -> str:
         return ""
     if isinstance(valor, (dt.datetime, dt.date)):
         return valor.strftime("%Y%m%d")
-    if isinstance(valor, float) and valor.is_integer():
-        return str(int(valor))
+    if isinstance(valor, float):             # 85.125 con 3 decimales se confundiría con «85.125» de miles
+        return str(int(valor)) if valor.is_integer() else f"{valor:.2f}"
     return str(valor).strip()
 
 

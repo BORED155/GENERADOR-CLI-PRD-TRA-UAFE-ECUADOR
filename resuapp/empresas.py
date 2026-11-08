@@ -23,6 +23,13 @@ from .estructura import Catalogos, Estructura, carpeta_recursos, cargar_de_uafi
 from .rutas import carpeta_empresas
 
 
+def _escribir(ruta: Path, texto: str) -> None:
+    """Primero a un archivo aparte: un apagón a mitad de camino no daña el que ya estaba bien."""
+    tmp = ruta.with_name(ruta.name + ".tmp")
+    tmp.write_text(texto, "utf-8")
+    tmp.replace(ruta)
+
+
 @dataclass
 class Empresa:
     id: str
@@ -74,19 +81,25 @@ class Empresa:
     def guardar(self) -> None:
         self.carpeta.mkdir(parents=True, exist_ok=True)
         datos = {k: v for k, v in asdict(self).items() if k != "id"}
-        (self.carpeta / "empresa.json").write_text(json.dumps(datos, ensure_ascii=False, indent=2), "utf-8")
+        _escribir(self.carpeta / "empresa.json", json.dumps(datos, ensure_ascii=False, indent=2))
 
     # --- memoria de valores por empresa ---
     def _json(self, nombre: str) -> dict:
         ruta = self.carpeta / nombre
         try:
             return json.loads(ruta.read_text("utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {}
+        except ValueError:                      # se aparta para que el próximo guardado no lo pise
+            ruta.replace(ruta.with_name(ruta.name + ".danado"))
+            return {}
+
+    def archivos_danados(self) -> list[str]:
+        return sorted(p.name for p in self.carpeta.glob("*.danado"))
 
     def _guardar_json(self, nombre: str, datos: dict) -> None:
         self.carpeta.mkdir(parents=True, exist_ok=True)
-        (self.carpeta / nombre).write_text(json.dumps(datos, ensure_ascii=False, indent=1), "utf-8")
+        _escribir(self.carpeta / nombre, json.dumps(datos, ensure_ascii=False, indent=1))
 
     def directorio_clientes(self) -> dict[str, dict[str, str]]:
         return self._json("clientes.json")
@@ -98,6 +111,15 @@ class Empresa:
             if ide:
                 directorio[ide] = {k: v for k, v in valores.items() if k not in ("CDR", "FCT")}
         self._guardar_json("clientes.json", directorio)
+
+    def consultas_sri(self) -> dict[str, dict]:
+        """Lo que respondió el SRI por cliente (así no se vuelve a consultar cada mes)."""
+        return self._json("sri.json")
+
+    def guardar_consulta_sri(self, identificacion: str, registro: dict) -> None:
+        todas = self.consultas_sri()
+        todas[identificacion] = registro
+        self._guardar_json("sri.json", todas)
 
     def valores_recordados(self) -> dict[str, dict[str, str]]:
         return self._json("valores.json")
@@ -125,7 +147,8 @@ def listar() -> list[Empresa]:
             continue
         try:
             datos = json.loads(ruta.read_text("utf-8"))
-        except ValueError:
+        except ValueError:                      # visible, para que no parezca que la empresa se borró
+            empresas.append(Empresa(id=carpeta.name, nombre=f"{carpeta.name} (empresa.json dañado)", codigo=""))
             continue
         campos = {k: datos.get(k, "") for k in ("nombre", "codigo", "ruc", "usuario", "agencia")}
         empresas.append(Empresa(id=carpeta.name, extra=datos.get("extra", {}), **campos))

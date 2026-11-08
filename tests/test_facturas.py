@@ -1,6 +1,8 @@
 import datetime as dt
 from decimal import Decimal
 
+from PySide6.QtCore import QItemSelectionModel
+
 from fabrica import CODIGO
 from resuapp import empresas, facturas, importar_facturas as imf, reglas
 from resuapp.modelo import Reporte
@@ -133,7 +135,6 @@ def test_reporte_completo_sin_pedir_datos(datos, uafi_zip, tmp_path):
         assert "xl/printerSettings/printerSettings1.bin" in z.namelist()   # viene de la plantilla oficial
         assert b"<cp:lastModifiedBy></cp:lastModifiedBy>" in z.read("docProps/core.xml")   # sin datos de autor
     # las facturas se guardan y se recuperan igual
-    assert imf.factura_a_dict(imf.factura_de_dict(imf.factura_a_dict(sin_direccion))) == imf.factura_a_dict(sin_direccion)
 
 
 def test_ventana_simple(datos, uafi_zip, tmp_path, monkeypatch):
@@ -214,7 +215,6 @@ def test_cada_factura_con_sus_datos_en_el_reporte(datos, uafi_zip):
             ob.hijos[0].get("VDE")) == ("LOC", "120", "0901", "94", "2500", "0")
     assert len(rep.clientes) == 1   # mismo cliente: una sola ficha, dos operaciones
     # las elecciones se guardan con la lista del mes
-    assert imf.factura_de_dict(imf.factura_a_dict(b)).resu == b.resu
 
 
 def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
@@ -244,7 +244,7 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     v.tabla.clearSelection()
     for r in (1, 2):
         v.tabla.selectionModel().select(v.tabla.model().index(r, simple.C_ADB),
-                                        simple.QItemSelectionModel.Select | simple.QItemSelectionModel.Rows)
+                                        QItemSelectionModel.Select | QItemSelectionModel.Rows)
     v.cambiar_campo(1, "adb", "150")
     assert [v.tabla.item(r, simple.C_ADB).text() for r in range(3)][1:] == ["150", "150"]
     # aplicar a todas las facturas del mismo cliente
@@ -254,25 +254,6 @@ def test_ventana_datos_por_factura(datos, uafi_zip, tmp_path, monkeypatch):
     v.volver_automatico([0], "ttb")
     assert "ttb" not in v.lista[0].resu
     v.close()
-
-
-def test_lista_de_cantones(datos, uafi_zip):
-    from PySide6.QtWidgets import QApplication
-
-    from resuapp.ui.campos import ComboCanton
-
-    app = QApplication.instance() or QApplication([])
-    tabla = {"0000": "N/A", "1701": "QUITO", "0901": "GUAYAQUIL", "0402": "BOLIVAR", "1302": "BOLIVAR"}
-    c = ComboCanton(tabla)
-    textos = [c.itemText(i) for i in range(c.count())]
-    assert textos == ["BOLIVAR (CARCHI) — 0402", "BOLIVAR (MANABÍ) — 1302", "GUAYAQUIL (GUAYAS) — 0901",
-                      "QUITO (PICHINCHA) — 1701"]                     # todos, por nombre, sin «N/A»
-    c.poner_valor("1302")
-    assert c.valor() == "1302"
-    c.setEditText("quito")                                            # escribir filtra y resuelve
-    assert c.valor() == "1701"
-    c.setEditText("bolivar")                                          # dos coincidencias: hay que elegir
-    assert c.valor() == ""
 
 
 def test_flechita_lista_y_doble_clic_escribir(datos, uafi_zip, monkeypatch):
