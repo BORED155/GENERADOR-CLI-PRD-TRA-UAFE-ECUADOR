@@ -1,6 +1,11 @@
+import pytest
+import sys
 import time
 
 from resuapp import reparar_uaf
+
+# El programa solo hace esta corrección fuera de Windows: allí «\\» sí separa carpetas y no se puede crear ese archivo.
+pytestmark = pytest.mark.skipif(sys.platform.startswith("win"), reason="solo Linux y Mac")
 
 
 def test_corrige_nombre_de_windows(tmp_path):
